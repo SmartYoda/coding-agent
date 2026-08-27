@@ -1,0 +1,38 @@
+# Maven and Java build output
+target/
+**/target/
+*.class
+
+# IDE metadata
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# Local OS files and logs
+.DS_Store
+*.log
+
+# Secrets and machine-local configuration
+.env
+.env.*
+config.local.*
+application-local.*
+**/application-local.*
+credentials*.json
+secrets*.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime data
+sessions/
+workspaces/
+
+# Non-project documents and local research/rendering artifacts
+/doc/
+/tmp/
+/DEVELOPMENT.md
