@@ -216,6 +216,9 @@ public final class OpenAiCompatibleChatModelClient implements ModelClient {
                 encoded.put("role", "tool");
                 encoded.put("tool_call_id", toolResult.callId());
                 encoded.put("content", toolResult.content());
+            } else if (message instanceof Message.TurnDigestMessage digest) {
+                encoded.put("role", "system");
+                encoded.put("content", digest.content());
             }
         }
         return messages;

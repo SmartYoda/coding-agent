@@ -1,6 +1,7 @@
 package com.yoda.codingagent.core.config;
 
 import java.net.URI;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
 
@@ -13,10 +14,13 @@ public final class AgentConfig {
     private final int maxSseEventBytes;
     private final int maxResponseCharacters;
     private final boolean thinkingEnabled;
+    private final Path dataDirectory;
+    private final Duration databaseBusyTimeout;
 
     public AgentConfig(URI baseUrl, String apiKey, String model, Duration modelTimeout,
                        int maxSseEventBytes, int maxResponseCharacters,
-                       boolean thinkingEnabled) {
+                       boolean thinkingEnabled, Path dataDirectory,
+                       Duration databaseBusyTimeout) {
         this.baseUrl = requireSupportedBaseUrl(baseUrl);
         this.apiKey = requireText(apiKey, "apiKey");
         this.model = requireText(model, "model");
@@ -25,6 +29,9 @@ public final class AgentConfig {
         this.maxResponseCharacters =
                 requirePositive(maxResponseCharacters, "maxResponseCharacters");
         this.thinkingEnabled = thinkingEnabled;
+        this.dataDirectory = requireAbsolutePath(dataDirectory, "dataDirectory");
+        this.databaseBusyTimeout = requireRange(databaseBusyTimeout,
+                "databaseBusyTimeout", Duration.ofMillis(1), Duration.ofSeconds(60));
     }
 
     public URI baseUrl() { return baseUrl; }
@@ -41,13 +48,21 @@ public final class AgentConfig {
 
     public boolean thinkingEnabled() { return thinkingEnabled; }
 
+    public Path dataDirectory() { return dataDirectory; }
+
+    public Path databasePath() { return dataDirectory.resolve("agent.db"); }
+
+    public Duration databaseBusyTimeout() { return databaseBusyTimeout; }
+
     @Override
     public String toString() {
         return "AgentConfig[baseUrl=" + baseUrl + ", apiKey=<redacted>, model=" + model
                 + ", modelTimeout=" + modelTimeout
                 + ", maxSseEventBytes=" + maxSseEventBytes
                 + ", maxResponseCharacters=" + maxResponseCharacters
-                + ", thinkingEnabled=" + thinkingEnabled + "]";
+                + ", thinkingEnabled=" + thinkingEnabled
+                + ", dataDirectory=" + dataDirectory
+                + ", databaseBusyTimeout=" + databaseBusyTimeout + "]";
     }
 
     private static URI requireSupportedBaseUrl(URI value) {
@@ -79,6 +94,25 @@ public final class AgentConfig {
             throw new IllegalArgumentException(name + " must be positive");
         }
         return value;
+    }
+
+    private static Duration requireRange(Duration value, String name, Duration minimum,
+                                         Duration maximum) {
+        Objects.requireNonNull(value, name);
+        if (value.compareTo(minimum) < 0 || value.compareTo(maximum) > 0) {
+            throw new IllegalArgumentException(name + " must be between "
+                    + minimum.toMillis() + " and " + maximum.toMillis() + " milliseconds");
+        }
+        return value;
+    }
+
+    private static Path requireAbsolutePath(Path value, String name) {
+        Objects.requireNonNull(value, name);
+        Path normalized = value.toAbsolutePath().normalize();
+        if (!normalized.isAbsolute()) {
+            throw new IllegalArgumentException(name + " must be absolute");
+        }
+        return normalized;
     }
 
     private static int requirePositive(int value, String name) {

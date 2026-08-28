@@ -10,31 +10,49 @@ import com.yoda.codingagent.core.api.AgentEvent;
 import com.yoda.codingagent.core.api.AgentRequest;
 import com.yoda.codingagent.core.api.AgentResult;
 import com.yoda.codingagent.core.api.CancellationToken;
-import com.yoda.codingagent.core.api.SessionId;
+import com.yoda.codingagent.core.api.ErrorCode;
+import com.yoda.codingagent.core.api.RunLimits;
+import com.yoda.codingagent.core.api.SessionConfig;
+import com.yoda.codingagent.core.api.SessionDescriptor;
 import com.yoda.codingagent.core.api.TurnStatus;
-import com.yoda.codingagent.core.api.WorkspaceId;
+import com.yoda.codingagent.core.api.WorkspaceDescriptor;
+import com.yoda.codingagent.core.config.AgentConfig;
+import com.yoda.codingagent.core.config.AgentConfigLoader;
+import com.yoda.codingagent.core.context.ContextManager;
+import com.yoda.codingagent.core.context.TokenEstimator;
+import com.yoda.codingagent.core.context.TurnDigestFactory;
 import com.yoda.codingagent.core.model.Message;
 import com.yoda.codingagent.core.model.ModelClient;
 import com.yoda.codingagent.core.model.ModelRequest;
 import com.yoda.codingagent.core.model.ModelStreamEvent;
 import com.yoda.codingagent.core.model.ModelStreamSink;
+import com.yoda.codingagent.core.persistence.StateStore;
+import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
+import com.yoda.codingagent.core.persistence.sqlite.SqliteStateFixture;
 import com.yoda.codingagent.core.tool.Tool;
 import com.yoda.codingagent.core.tool.ToolContext;
 import com.yoda.codingagent.core.tool.ToolDefinition;
 import com.yoda.codingagent.core.tool.ToolRegistry;
 import com.yoda.codingagent.core.tool.ToolResult;
+import com.yoda.codingagent.core.workspace.WorkspaceRegistry;
+import com.yoda.codingagent.core.workspace.WorkspaceResolver;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class AgentRunnerTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
-    void completesToolResultRoundTripAndExecutesOnlyOnce() {
+    void completesPersistedToolRoundTripAndExecutesOnlyOnce(@TempDir Path tempDirectory)
+            throws Exception {
         ScriptedModelClient model = new ScriptedModelClient(List.of(
                 List.of(new ModelStreamEvent.ResponseStarted("one"),
                         new ModelStreamEvent.ToolCallDelta(
@@ -48,11 +66,11 @@ class AgentRunnerTest {
                         new ModelStreamEvent.ResponseFinished("stop"),
                         new ModelStreamEvent.StreamEnded())));
         AtomicInteger executions = new AtomicInteger();
-        ToolRegistry tools = new ToolRegistry(List.of(echoTool(executions)));
-        AgentRunner runner = runner(model, tools);
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions, tempDirectory.resolve("workspace")))));
         List<AgentEvent> events = new ArrayList<>();
 
-        AgentResult result = runner.run(WorkspaceId.random(), SessionId.random(),
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
                 new AgentRequest("运行测试工具"), events::add, CancellationToken.NONE);
 
         assertEquals(TurnStatus.COMPLETED, result.status());
@@ -63,6 +81,8 @@ class AgentRunnerTest {
                 model.requests.get(1).messages().get(2));
         assertInstanceOf(Message.ToolResultMessage.class,
                 model.requests.get(1).messages().get(3));
+        assertEquals(1, application.store().loadCanonicalHistory(
+                application.session().sessionId()).completedTurns().size());
         assertTrue(events.stream().anyMatch(AgentEvent.ModelTextDelta.class::isInstance));
         for (int index = 0; index < events.size(); index++) {
             assertEquals(index + 1L, events.get(index).sequence());
@@ -70,28 +90,155 @@ class AgentRunnerTest {
     }
 
     @Test
-    void incompleteToolCallNeverExecutes() {
+    void incompleteToolCallNeverExecutesOrEntersCanonicalHistory(
+            @TempDir Path tempDirectory) throws Exception {
         ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
                 new ModelStreamEvent.ResponseStarted("one"),
                 new ModelStreamEvent.ToolCallDelta(
                         0, "call-1", "test_echo", "{\"value\":"))));
         AtomicInteger executions = new AtomicInteger();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions, tempDirectory.resolve("workspace")))));
 
-        AgentResult result = runner(model,
-                new ToolRegistry(List.of(echoTool(executions)))).run(
-                WorkspaceId.random(), SessionId.random(), new AgentRequest("run"),
-                ignored -> { }, CancellationToken.NONE);
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), ignored -> { }, CancellationToken.NONE);
 
         assertEquals(TurnStatus.FAILED, result.status());
         assertEquals(0, executions.get());
+        assertTrue(application.store().loadCanonicalHistory(application.session().sessionId())
+                .completedTurns().isEmpty());
     }
 
-    private AgentRunner runner(ModelClient model, ToolRegistry tools) {
-        return new AgentRunner(model, tools, objectMapper, "qwen3.8-flash",
-                Duration.ofSeconds(10), 1024, 4096, 4);
+    @Test
+    void beginTurnStorageFailureCallsNeitherModelNorTool(@TempDir Path tempDirectory)
+            throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
+                new ModelStreamEvent.ResponseStarted("one"),
+                new ModelStreamEvent.TextDelta("unused"),
+                new ModelStreamEvent.ResponseFinished("stop"),
+                new ModelStreamEvent.StreamEnded())));
+        AtomicInteger executions = new AtomicInteger();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions, tempDirectory.resolve("workspace")))),
+                FailingStateStore.FailurePoint.BEGIN_TURN);
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), ignored -> { }, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.FAILED, result.status());
+        assertEquals(ErrorCode.STORAGE_ERROR, result.errorCode());
+        assertEquals(0, model.requests.size());
+        assertEquals(0, executions.get());
     }
 
-    private Tool echoTool(AtomicInteger executions) {
+    @Test
+    void stagedWriteFailureExecutesNoToolAndStartsNoSecondModelRequest(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
+                new ModelStreamEvent.ResponseStarted("one"),
+                new ModelStreamEvent.ToolCallDelta(
+                        0, "call-1", "test_echo", "{\"value\":\"hello\"}"),
+                new ModelStreamEvent.ResponseFinished("tool_calls"),
+                new ModelStreamEvent.StreamEnded())));
+        AtomicInteger executions = new AtomicInteger();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions, tempDirectory.resolve("workspace")))),
+                FailingStateStore.FailurePoint.STAGE_TOOL_STEP);
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), ignored -> { }, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.FAILED, result.status());
+        assertEquals(ErrorCode.STORAGE_ERROR, result.errorCode());
+        assertEquals(1, model.requests.size());
+        assertEquals(0, executions.get());
+        assertTrue(application.store().loadCanonicalHistory(application.session().sessionId())
+                .completedTurns().isEmpty());
+    }
+
+    @Test
+    void resultWriteFailureAuditsExecutedCallAsUnknownAndAbortsStep(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
+                new ModelStreamEvent.ResponseStarted("one"),
+                new ModelStreamEvent.ToolCallDelta(
+                        0, "call-1", "test_echo", "{\"value\":\"hello\"}"),
+                new ModelStreamEvent.ResponseFinished("tool_calls"),
+                new ModelStreamEvent.StreamEnded())));
+        AtomicInteger executions = new AtomicInteger();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions, tempDirectory.resolve("workspace")))),
+                FailingStateStore.FailurePoint.RECORD_TOOL_RESULT);
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), ignored -> { }, CancellationToken.NONE);
+
+        assertEquals(ErrorCode.STORAGE_ERROR, result.errorCode());
+        assertEquals(1, executions.get());
+        assertEquals(1, model.requests.size());
+        var state = new SqliteStateFixture(application.config().databasePath())
+                .readRecoveryState(result.turnId());
+        assertEquals("FAILED", state.turnStatus());
+        assertEquals("ABORTED", state.stepStatus());
+        assertEquals(List.of("UNKNOWN"), state.toolStatuses());
+    }
+
+    @Test
+    void startupRecoversTurnWhenWritingItsFailureStateAlsoFailed(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
+                new ModelStreamEvent.ResponseStarted("one"),
+                new ModelStreamEvent.ResponseFinished("stop"),
+                new ModelStreamEvent.StreamEnded())));
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of()), FailingStateStore.FailurePoint.FAIL_TURN);
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), ignored -> { }, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.FAILED, result.status());
+        assertEquals(ErrorCode.STORAGE_ERROR, result.errorCode());
+        assertEquals("STREAMING_MODEL", new SqliteStateFixture(application.config().databasePath())
+                .readTurnStatus(result.turnId()));
+
+        SqliteStateStore.open(application.config());
+
+        assertEquals("INTERRUPTED", new SqliteStateFixture(application.config().databasePath())
+                .readTurnStatus(result.turnId()));
+    }
+
+    private TestApplication application(Path tempDirectory, ModelClient model,
+                                        ToolRegistry tools) throws Exception {
+        return application(tempDirectory, model, tools, null);
+    }
+
+    private TestApplication application(Path tempDirectory, ModelClient model,
+                                        ToolRegistry tools,
+                                        FailingStateStore.FailurePoint failurePoint)
+            throws Exception {
+        AgentConfig config = new AgentConfigLoader().load(Map.of(
+                "apiKey", "test-key",
+                "dataDirectory", tempDirectory.resolve("state").toString()), Map.of());
+        SqliteStateStore store = SqliteStateStore.open(config);
+        StateStore effectiveStore = failurePoint == null
+                ? store : new FailingStateStore(store, failurePoint);
+        Path root = tempDirectory.resolve("workspace");
+        Files.createDirectories(root);
+        WorkspaceRegistry workspaces = new WorkspaceRegistry(effectiveStore,
+                new WorkspaceResolver(config.dataDirectory()));
+        WorkspaceDescriptor workspace = workspaces.register("Workspace", root);
+        SessionRegistry sessions = new SessionRegistry(effectiveStore, workspaces);
+        AgentRunner runner = new AgentRunner(model, tools, objectMapper, config.model(),
+                config.maxResponseCharacters(), effectiveStore,
+                new ContextManager(new TokenEstimator()), new TurnDigestFactory());
+        DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
+                DefaultAgentService.DEFAULT_SYSTEM_PROMPT);
+        SessionDescriptor session = service.openSession(
+                new SessionConfig(workspace.workspaceId(), limits()));
+        return new TestApplication(config, store, service, session);
+    }
+
+    private Tool echoTool(AtomicInteger executions, Path expectedRoot) {
         ObjectNode schema = objectMapper.createObjectNode();
         schema.put("type", "object");
         schema.putObject("properties").putObject("value").put("type", "string");
@@ -105,10 +252,27 @@ class AgentRunnerTest {
             @Override
             public ToolResult execute(ToolContext context, ObjectNode arguments) {
                 executions.incrementAndGet();
+                try {
+                    assertEquals(expectedRoot.toRealPath(), context.workspaceRoot());
+                } catch (Exception exception) {
+                    throw new AssertionError("workspace root must remain resolvable", exception);
+                }
                 return ToolResult.success(arguments.path("value").asText());
             }
         };
     }
+
+    private static RunLimits limits() {
+        return new RunLimits(4, Duration.ofMinutes(2), Duration.ofSeconds(30),
+                Duration.ofSeconds(10), 16_384, 8_192, 1_024, 2);
+    }
+
+    private record TestApplication(
+            AgentConfig config,
+            SqliteStateStore store,
+            DefaultAgentService service,
+            SessionDescriptor session
+    ) { }
 
     private static final class ScriptedModelClient implements ModelClient {
         private final List<List<ModelStreamEvent>> scripts;

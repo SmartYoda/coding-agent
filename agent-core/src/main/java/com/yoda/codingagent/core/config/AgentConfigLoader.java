@@ -1,6 +1,7 @@
 package com.yoda.codingagent.core.config;
 
 import java.net.URI;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
@@ -32,8 +33,14 @@ public final class AgentConfigLoader {
                 "maxResponseCharacters");
         boolean thinking = Boolean.parseBoolean(value(overrides, environment,
                 "enableThinking", "LLM_ENABLE_THINKING", "false"));
+        Path dataDirectory = Path.of(value(overrides, environment, "dataDirectory",
+                "CODING_AGENT_DATA_DIR", defaultDataDirectory().toString()));
+        int databaseBusyTimeoutMillis = parseInt(value(overrides, environment,
+                "databaseBusyTimeout", "CODING_AGENT_DB_BUSY_TIMEOUT_MS", "5000"),
+                "databaseBusyTimeout");
         return new AgentConfig(URI.create(baseUrl), apiKey, model, Duration.ofSeconds(timeoutSeconds),
-                maxEventBytes, maxResponseCharacters, thinking);
+                maxEventBytes, maxResponseCharacters, thinking, dataDirectory,
+                Duration.ofMillis(databaseBusyTimeoutMillis));
     }
 
     private static String value(Map<String, String> overrides, Map<String, String> environment,
@@ -65,5 +72,9 @@ public final class AgentConfigLoader {
         } catch (NumberFormatException exception) {
             throw new IllegalArgumentException(name + " must be an integer", exception);
         }
+    }
+
+    private static Path defaultDataDirectory() {
+        return Path.of(System.getProperty("user.home"), ".coding-agent");
     }
 }

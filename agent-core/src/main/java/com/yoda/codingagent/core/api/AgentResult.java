@@ -12,6 +12,11 @@ public record AgentResult(
     public AgentResult {
         Objects.requireNonNull(turnId, "turnId");
         Objects.requireNonNull(status, "status");
+        if (status != TurnStatus.COMPLETED && status != TurnStatus.FAILED
+                && status != TurnStatus.CANCELLED && status != TurnStatus.LIMIT_REACHED
+                && status != TurnStatus.INTERRUPTED) {
+            throw new IllegalArgumentException("AgentResult requires a terminal turn status");
+        }
         boolean successful = status == TurnStatus.COMPLETED;
         if (successful && (finalText == null || finalText.isBlank()
                 || errorCode != null || errorMessage != null)) {
@@ -29,7 +34,9 @@ public record AgentResult(
 
     public static AgentResult failed(
             TurnId turnId, TurnStatus status, ErrorCode errorCode, String safeMessage) {
-        if (status == TurnStatus.COMPLETED || status == TurnStatus.RUNNING) {
+        if (status == TurnStatus.COMPLETED || status == TurnStatus.CREATED
+                || status == TurnStatus.RUNNING || status == TurnStatus.STREAMING_MODEL
+                || status == TurnStatus.EXECUTING_TOOL) {
             throw new IllegalArgumentException("status must be terminal and unsuccessful");
         }
         return new AgentResult(turnId, status, null,

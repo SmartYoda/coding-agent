@@ -12,6 +12,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import com.yoda.codingagent.core.api.CancellationToken;
 import com.yoda.codingagent.core.api.ErrorCode;
+import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.config.AgentConfig;
 import com.yoda.codingagent.core.error.AgentException;
 import com.yoda.codingagent.core.model.Message;
@@ -21,6 +22,7 @@ import com.yoda.codingagent.core.tool.ToolDefinition;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.file.Path;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -181,7 +183,9 @@ class OpenAiCompatibleChatModelClientTest {
     private AgentConfig config(String key) {
         return new AgentConfig(URI.create("http://127.0.0.1:" + server.getAddress().getPort()
                 + "/compatible-mode/v1"), key, "qwen3.8-flash", Duration.ofSeconds(10),
-                4096, 4096, false);
+                4096, 4096, false,
+                Path.of(System.getProperty("java.io.tmpdir"), "coding-agent-model-test"),
+                Duration.ofSeconds(5));
     }
 
     private ModelRequest request() {
@@ -194,7 +198,7 @@ class OpenAiCompatibleChatModelClientTest {
         schema.putObject("properties").putObject("path").put("type", "string");
         schema.putArray("required").add("path");
         return new ModelRequest("qwen3.8-flash",
-                List.of(new Message.UserMessage("读取 pom.xml")),
+                List.of(new Message.UserMessage(TurnId.random(), "读取 pom.xml")),
                 List.of(new ToolDefinition("read_file", "Read one workspace file", schema)),
                 timeout, 1024);
     }
