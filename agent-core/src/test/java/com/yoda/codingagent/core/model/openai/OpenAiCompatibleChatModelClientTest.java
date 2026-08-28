@@ -1,0 +1,213 @@
+package com.yoda.codingagent.core.model.openai;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import com.yoda.codingagent.core.api.CancellationToken;
+import com.yoda.codingagent.core.api.ErrorCode;
+import com.yoda.codingagent.core.config.AgentConfig;
+import com.yoda.codingagent.core.error.AgentException;
+import com.yoda.codingagent.core.model.Message;
+import com.yoda.codingagent.core.model.ModelRequest;
+import com.yoda.codingagent.core.model.ModelResponseAccumulator;
+import com.yoda.codingagent.core.tool.ToolDefinition;
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+
+class OpenAiCompatibleChatModelClientTest {
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private HttpServer server;
+
+    @AfterEach
+    void stopServer() {
+        if (server != null) {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void sendsQwenCompatibleStreamingRequestAndParsesUsage() throws Exception {
+        AtomicReference<JsonNode> capturedBody = new AtomicReference<>();
+        AtomicReference<String> authorization = new AtomicReference<>();
+        startServer(exchange -> {
+            capturedBody.set(objectMapper.readTree(exchange.getRequestBody()));
+            authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            respond(exchange, 200, """
+                    data: {"id":"resp-1","choices":[{"delta":{"content":"完成"},"finish_reason":"stop"}]}
+
+                    data: {"id":"resp-1","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}
+
+                    data: [DONE]
+
+                    """);
+        });
+        AgentConfig config = config("test-secret");
+        OpenAiCompatibleChatModelClient client = new OpenAiCompatibleChatModelClient(
+                config, HttpClient.newHttpClient(), objectMapper);
+        ModelResponseAccumulator accumulator = new ModelResponseAccumulator(objectMapper, 4096);
+
+        client.stream(request(), accumulator, CancellationToken.NONE);
+
+        assertEquals("完成", accumulator.response().visibleText());
+        assertEquals(4, accumulator.response().usage().totalTokens());
+        assertEquals("Bearer test-secret", authorization.get());
+        assertEquals("qwen3.8-flash", capturedBody.get().get("model").asText());
+        assertTrue(capturedBody.get().get("stream").asBoolean());
+        assertTrue(capturedBody.get().path("stream_options").path("include_usage").asBoolean());
+        assertFalse(capturedBody.get().get("enable_thinking").asBoolean());
+        assertEquals("read_file",
+                capturedBody.get().path("tools").get(0).path("function").path("name").asText());
+    }
+
+    @Test
+    void mapsAuthenticationFailureWithoutLeakingTheKey() throws Exception {
+        startServer(exchange -> respond(exchange, 401, "secret provider response"));
+        String key = "never-leak-this-key";
+        OpenAiCompatibleChatModelClient client = new OpenAiCompatibleChatModelClient(
+                config(key), HttpClient.newHttpClient(), objectMapper);
+
+        AgentException exception = assertThrows(AgentException.class,
+                () -> client.stream(request(), ignored -> { }, CancellationToken.NONE));
+
+        assertEquals(ErrorCode.MODEL_AUTHENTICATION, exception.errorCode());
+        assertFalse(exception.getMessage().contains(key));
+        assertFalse(exception.getMessage().contains("provider response"));
+    }
+
+    @Test
+    void cancellationClosesASilentStreamingBodyPromptly() throws Exception {
+        CountDownLatch releaseServer = new CountDownLatch(1);
+        startServer(exchange -> {
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            exchange.getResponseBody().write(("data: {\"id\":\"probe\",\"choices\":[{"
+                    + "\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n")
+                    .getBytes(StandardCharsets.UTF_8));
+            exchange.getResponseBody().flush();
+            try {
+                releaseServer.await(3, TimeUnit.SECONDS);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        OpenAiCompatibleChatModelClient client = new OpenAiCompatibleChatModelClient(
+                config("test-secret"), HttpClient.newHttpClient(), objectMapper);
+        AtomicBoolean cancelled = new AtomicBoolean();
+        CountDownLatch firstEvent = new CountDownLatch(1);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        Future<?> future = executor.submit(() -> client.stream(request(), event -> {
+            if (event instanceof com.yoda.codingagent.core.model.ModelStreamEvent.ResponseStarted) {
+                firstEvent.countDown();
+            }
+        }, cancelled::get));
+        try {
+            assertTrue(firstEvent.await(2, TimeUnit.SECONDS), "stream did not start");
+            cancelled.set(true);
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> future.get(1, TimeUnit.SECONDS));
+            AgentException cause = (AgentException) failure.getCause();
+            assertEquals(ErrorCode.CANCELLED, cause.errorCode());
+        } finally {
+            releaseServer.countDown();
+            future.cancel(true);
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void timeoutClosesASilentStreamingBodyAndKeepsTimeoutClassification() throws Exception {
+        CountDownLatch releaseServer = new CountDownLatch(1);
+        startServer(exchange -> {
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            exchange.getResponseBody().write(("data: {\"id\":\"probe\",\"choices\":[{"
+                    + "\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n")
+                    .getBytes(StandardCharsets.UTF_8));
+            exchange.getResponseBody().flush();
+            try {
+                releaseServer.await(3, TimeUnit.SECONDS);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        OpenAiCompatibleChatModelClient client = new OpenAiCompatibleChatModelClient(
+                config("test-secret"), HttpClient.newHttpClient(), objectMapper);
+
+        try {
+            AgentException failure = assertThrows(AgentException.class,
+                    () -> client.stream(request(Duration.ofMillis(100)), ignored -> { },
+                            CancellationToken.NONE));
+            assertEquals(ErrorCode.MODEL_TIMEOUT, failure.errorCode());
+        } finally {
+            releaseServer.countDown();
+        }
+    }
+
+    private void startServer(ExchangeHandler handler) throws IOException {
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/compatible-mode/v1/chat/completions", exchange -> {
+            try {
+                handler.handle(exchange);
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+    }
+
+    private AgentConfig config(String key) {
+        return new AgentConfig(URI.create("http://127.0.0.1:" + server.getAddress().getPort()
+                + "/compatible-mode/v1"), key, "qwen3.8-flash", Duration.ofSeconds(10),
+                4096, 4096, false);
+    }
+
+    private ModelRequest request() {
+        return request(Duration.ofSeconds(10));
+    }
+
+    private ModelRequest request(Duration timeout) {
+        ObjectNode schema = objectMapper.createObjectNode();
+        schema.put("type", "object");
+        schema.putObject("properties").putObject("path").put("type", "string");
+        schema.putArray("required").add("path");
+        return new ModelRequest("qwen3.8-flash",
+                List.of(new Message.UserMessage("读取 pom.xml")),
+                List.of(new ToolDefinition("read_file", "Read one workspace file", schema)),
+                timeout, 1024);
+    }
+
+    private static void respond(HttpExchange exchange, int status, String body) throws IOException {
+        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
+        exchange.sendResponseHeaders(status, bytes.length);
+        exchange.getResponseBody().write(bytes);
+    }
+
+    @FunctionalInterface
+    private interface ExchangeHandler {
+        void handle(HttpExchange exchange) throws IOException;
+    }
+}

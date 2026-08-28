@@ -1,16 +1,13 @@
 package com.yoda.codingagent.cli;
 
-import com.yoda.codingagent.core.CoreModule;
-
 public final class Main {
 
     private Main() {
     }
 
     public static void main(String[] args) {
-        System.out.printf(
-                "Coding Agent development environment ready (%s, Java %d).%n",
-                CoreModule.name(),
-                Runtime.version().feature());
+        System.out.printf("Coding Agent CLI (Java %d).%n", Runtime.version().feature());
+        System.out.println(
+                "Day 1 core foundation is ready; interactive CLI wiring is scheduled for Day 3.");
     }
 }
