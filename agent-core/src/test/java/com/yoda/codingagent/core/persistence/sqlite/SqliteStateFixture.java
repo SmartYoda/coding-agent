@@ -108,6 +108,88 @@ public final class SqliteStateFixture {
         }
     }
 
+    List<TurnId> insertCompletedTextTurns(SessionId sessionId, int count) throws Exception {
+        List<TurnId> turnIds = new ArrayList<>(count);
+        try (Connection connection = openConnection()) {
+            connection.setAutoCommit(false);
+            long now = Instant.now().toEpochMilli();
+            int turnNo = nextInt(connection,
+                    "SELECT COALESCE(MAX(turn_no), 0) + 1 FROM turns WHERE session_id = ?",
+                    sessionId.value().toString());
+            int sequence = nextInt(connection,
+                    "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM messages WHERE session_id = ?",
+                    sessionId.value().toString());
+            for (int index = 0; index < count; index++) {
+                TurnId turnId = TurnId.random();
+                String stepId = UUID.randomUUID().toString();
+                turnIds.add(turnId);
+                execute(connection, """
+                        INSERT INTO turns
+                            (id, session_id, turn_no, status, termination_reason,
+                             created_at, updated_at, finished_at)
+                        VALUES (?, ?, ?, 'COMPLETED', NULL, ?, ?, ?)
+                        """, turnId.value().toString(), sessionId.value().toString(), turnNo++,
+                        now, now, now);
+                execute(connection, """
+                        INSERT INTO model_steps
+                            (id, turn_id, step_no, status, response_id, visible_text,
+                             prompt_tokens, completion_tokens, context_estimated_tokens,
+                             created_at, updated_at)
+                        VALUES (?, ?, 1, 'COMMITTED', ?, ?, 1, 1, 1, ?, ?)
+                        """, stepId, turnId.value().toString(), "response-" + index,
+                        "answer-" + index, now, now);
+                insertMessage(connection, sessionId, turnId, null, null, sequence++,
+                        "USER", "USER_TEXT", "question-" + index, now);
+                insertMessage(connection, sessionId, turnId, stepId, null, sequence++,
+                        "ASSISTANT", "ASSISTANT_TEXT", "answer-" + index, now);
+                execute(connection, """
+                        INSERT INTO turn_digests (turn_id, digest_json, created_at)
+                        VALUES (?, ?, ?)
+                        """, turnId.value().toString(), """
+                        {"userGoal":"question","status":"COMPLETED",
+                         "finalSummary":"answer","filesRead":[],"filesModified":[],
+                         "commands":[],"importantErrors":[],"openItems":[]}
+                        """, now);
+            }
+            connection.commit();
+        }
+        return List.copyOf(turnIds);
+    }
+
+    void markFirstToolCallUnknown(TurnId turnId) throws Exception {
+        try (Connection connection = openConnection();
+                Statement pragma = connection.createStatement()) {
+            pragma.execute("PRAGMA ignore_check_constraints = ON");
+            execute(connection, """
+                    UPDATE tool_calls
+                    SET execution_status = 'UNKNOWN'
+                    WHERE id = (
+                        SELECT tc.id FROM tool_calls tc
+                        JOIN model_steps ms ON ms.id = tc.model_step_id
+                        WHERE ms.turn_id = ?
+                        ORDER BY tc.ordinal
+                        LIMIT 1
+                    )
+                    """, turnId.value().toString());
+        }
+    }
+
+    void clearFirstToolMetadata(TurnId turnId) throws Exception {
+        try (Connection connection = openConnection()) {
+            execute(connection, """
+                    UPDATE tool_calls
+                    SET result_metadata_json = NULL
+                    WHERE id = (
+                        SELECT tc.id FROM tool_calls tc
+                        JOIN model_steps ms ON ms.id = tc.model_step_id
+                        WHERE ms.turn_id = ?
+                        ORDER BY tc.ordinal
+                        LIMIT 1
+                    )
+                    """, turnId.value().toString());
+        }
+    }
+
     void insertRecoverableToolTurn(SessionId sessionId, TurnId turnId) throws Exception {
         try (Connection connection = openConnection()) {
             connection.setAutoCommit(false);

@@ -14,8 +14,9 @@ public record ContextBudgetPolicy(
                 || reservedOutputTokens >= maxInputTokens) {
             throw new IllegalArgumentException("invalid context token budget");
         }
-        if (recentFullTurns < 0) {
-            throw new IllegalArgumentException("recentFullTurns must not be negative");
+        if (recentFullTurns < 0 || recentFullTurns > RunLimits.MAX_RECENT_FULL_TURNS) {
+            throw new IllegalArgumentException("recentFullTurns must be between 0 and "
+                    + RunLimits.MAX_RECENT_FULL_TURNS);
         }
     }
 

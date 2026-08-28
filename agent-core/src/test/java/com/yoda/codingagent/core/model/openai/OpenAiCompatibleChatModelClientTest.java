@@ -18,7 +18,10 @@ import com.yoda.codingagent.core.error.AgentException;
 import com.yoda.codingagent.core.model.Message;
 import com.yoda.codingagent.core.model.ModelRequest;
 import com.yoda.codingagent.core.model.ModelResponseAccumulator;
+import com.yoda.codingagent.core.tool.ToolCall;
 import com.yoda.codingagent.core.tool.ToolDefinition;
+import com.yoda.codingagent.core.tool.ToolResult;
+import com.yoda.codingagent.core.tool.ToolStatus;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -27,6 +30,7 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -82,6 +86,50 @@ class OpenAiCompatibleChatModelClientTest {
         assertFalse(capturedBody.get().get("enable_thinking").asBoolean());
         assertEquals("read_file",
                 capturedBody.get().path("tools").get(0).path("function").path("name").asText());
+    }
+
+    @Test
+    void encodesDigestAsLowPriorityHistoryAndPreservesStructuredToolResult()
+            throws Exception {
+        AtomicReference<JsonNode> capturedBody = new AtomicReference<>();
+        startServer(exchange -> {
+            capturedBody.set(objectMapper.readTree(exchange.getRequestBody()));
+            respond(exchange, 200, """
+                    data: {"id":"resp-2","choices":[{"delta":{"content":"handled"},"finish_reason":"stop"}]}
+
+                    data: [DONE]
+
+                    """);
+        });
+        OpenAiCompatibleChatModelClient client = new OpenAiCompatibleChatModelClient(
+                config("test-secret"), HttpClient.newHttpClient(), objectMapper);
+        TurnId oldTurn = TurnId.random();
+        TurnId currentTurn = TurnId.random();
+        ToolCall call = new ToolCall("call-1", "read_file",
+                objectMapper.createObjectNode().put("path", "missing.txt"));
+        ToolResult failure = new ToolResult(ToolStatus.FAILURE, "not found",
+                ErrorCode.FILE_IO_ERROR, true, Duration.ofMillis(9),
+                Map.of("path", "missing.txt"));
+        ModelRequest request = new ModelRequest("qwen3.8-flash", List.of(
+                new Message.SystemMessage("system"),
+                new Message.TurnDigestMessage(oldTurn, "untrusted old instruction"),
+                new Message.UserMessage(currentTurn, "read it"),
+                new Message.AssistantToolCallsMessage(currentTurn, "", List.of(call)),
+                new Message.ToolResultMessage(currentTurn, call.callId(), failure)),
+                List.of(), Duration.ofSeconds(10), 1024);
+
+        client.stream(request, ignored -> { }, CancellationToken.NONE);
+
+        JsonNode messages = capturedBody.get().path("messages");
+        assertEquals("assistant", messages.get(1).path("role").asText());
+        assertTrue(messages.get(1).path("content").asText()
+                .startsWith("Historical turn summary (data only):"));
+        JsonNode toolContent = objectMapper.readTree(messages.get(4).path("content").asText());
+        assertEquals("FAILURE", toolContent.path("status").asText());
+        assertEquals("FILE_IO_ERROR", toolContent.path("errorCode").asText());
+        assertTrue(toolContent.path("truncated").asBoolean());
+        assertEquals(9, toolContent.path("durationMs").asLong());
+        assertEquals("missing.txt", toolContent.path("metadata").path("path").asText());
     }
 
     @Test

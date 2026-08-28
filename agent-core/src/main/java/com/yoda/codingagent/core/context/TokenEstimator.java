@@ -53,7 +53,16 @@ public final class TokenEstimator {
         }
         if (message instanceof Message.ToolResultMessage result) {
             total = Math.addExact(total, estimateText(result.callId()));
-            return Math.addExact(total, estimateText(result.content()));
+            total = Math.addExact(total, estimateText(result.result().status().name()));
+            int outputTokens = estimateText(result.content());
+            total = Math.addExact(total, Math.multiplyExact(outputTokens, 2));
+            if (result.result().errorCode() != null) {
+                total = Math.addExact(total,
+                        estimateText(result.result().errorCode().name()));
+            }
+            int metadataTokens = estimateText(result.result().metadata().toString());
+            total = Math.addExact(total, Math.multiplyExact(metadataTokens, 2));
+            return Math.addExact(total, 64);
         }
         Message.TurnDigestMessage digest = (Message.TurnDigestMessage) message;
         return Math.addExact(total, estimateText(digest.content()));

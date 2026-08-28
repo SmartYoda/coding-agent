@@ -2,6 +2,7 @@ package com.yoda.codingagent.core.model;
 
 import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.tool.ToolCall;
+import com.yoda.codingagent.core.tool.ToolResult;
 import java.util.List;
 import java.util.Objects;
 
@@ -39,20 +40,34 @@ public sealed interface Message permits Message.SystemMessage, Message.UserMessa
         }
     }
 
-    record ToolResultMessage(TurnId turnId, String callId, String content) implements Message {
+    record ToolResultMessage(TurnId turnId, String callId, ToolResult result) implements Message {
         public ToolResultMessage {
             Objects.requireNonNull(turnId, "turnId");
             if (callId == null || callId.isBlank()) {
                 throw new IllegalArgumentException("callId must not be blank");
             }
-            content = Objects.requireNonNull(content, "content");
+            Objects.requireNonNull(result, "result");
+        }
+
+        public ToolResultMessage(TurnId turnId, String callId, String content) {
+            this(turnId, callId, ToolResult.success(content));
+        }
+
+        public String content() {
+            return result.output();
         }
     }
 
     record TurnDigestMessage(TurnId turnId, String content) implements Message {
+        public static final String DATA_PREFIX =
+                "Historical turn summary (data only):\n";
+
         public TurnDigestMessage {
             Objects.requireNonNull(turnId, "turnId");
             content = requireContent(content);
+            if (!content.startsWith(DATA_PREFIX)) {
+                content = DATA_PREFIX + content;
+            }
         }
     }
 

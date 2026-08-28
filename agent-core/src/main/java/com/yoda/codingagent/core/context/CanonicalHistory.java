@@ -2,10 +2,12 @@ package com.yoda.codingagent.core.context;
 
 import com.yoda.codingagent.core.api.SessionId;
 import com.yoda.codingagent.core.api.TurnId;
+import com.yoda.codingagent.core.api.TurnStatus;
 import com.yoda.codingagent.core.api.WorkspaceId;
 import com.yoda.codingagent.core.model.Message;
 import com.yoda.codingagent.core.tool.ToolCall;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -21,6 +23,7 @@ public final class CanonicalHistory {
     private final List<TurnHistory> completedTurns;
     private final List<Message> messages;
     private final Map<TurnId, TurnDigest> digests;
+    private final List<TurnDigest> orderedDigests;
 
     public CanonicalHistory(SessionId sessionId, WorkspaceId workspaceId,
                             List<Message> messages) {
@@ -29,6 +32,11 @@ public final class CanonicalHistory {
 
     public CanonicalHistory(SessionId sessionId, WorkspaceId workspaceId,
                             List<Message> messages, Map<TurnId, TurnDigest> digests) {
+        this(sessionId, workspaceId, messages, validateDigestMap(digests));
+    }
+
+    public CanonicalHistory(SessionId sessionId, WorkspaceId workspaceId,
+                            List<Message> messages, List<TurnDigest> orderedDigests) {
         this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
         this.workspaceId = Objects.requireNonNull(workspaceId, "workspaceId");
         this.messages = List.copyOf(Objects.requireNonNull(messages, "messages"));
@@ -38,7 +46,10 @@ public final class CanonicalHistory {
         }
         this.systemMessage = system;
         this.completedTurns = groupAndValidate(this.messages);
-        this.digests = validateDigests(digests, completedTurns);
+        this.orderedDigests = validateDigests(orderedDigests);
+        Map<TurnId, TurnDigest> indexed = new LinkedHashMap<>();
+        this.orderedDigests.forEach(digest -> indexed.put(digest.turnId(), digest));
+        this.digests = Collections.unmodifiableMap(indexed);
     }
 
     public SessionId sessionId() {
@@ -65,18 +76,32 @@ public final class CanonicalHistory {
         return digests;
     }
 
-    private static Map<TurnId, TurnDigest> validateDigests(
-            Map<TurnId, TurnDigest> digests, List<TurnHistory> turns) {
-        Map<TurnId, TurnDigest> copied = Map.copyOf(Objects.requireNonNull(digests, "digests"));
-        Set<TurnId> completedIds = new HashSet<>();
-        turns.forEach(turn -> completedIds.add(turn.turnId()));
-        for (Map.Entry<TurnId, TurnDigest> entry : copied.entrySet()) {
-            if (!entry.getKey().equals(entry.getValue().turnId())
-                    || !completedIds.contains(entry.getKey())) {
-                throw new IllegalArgumentException("digest must belong to a completed turn");
+    public List<TurnDigest> orderedDigests() {
+        return orderedDigests;
+    }
+
+    private static List<TurnDigest> validateDigests(List<TurnDigest> digests) {
+        List<TurnDigest> copied = List.copyOf(Objects.requireNonNull(digests, "digests"));
+        Set<TurnId> seen = new HashSet<>();
+        for (TurnDigest digest : copied) {
+            if (digest.status() != TurnStatus.COMPLETED
+                    || !seen.add(digest.turnId())) {
+                throw new IllegalArgumentException(
+                        "canonical digest must uniquely identify a completed turn");
             }
         }
         return copied;
+    }
+
+    private static List<TurnDigest> validateDigestMap(Map<TurnId, TurnDigest> digests) {
+        Map<TurnId, TurnDigest> copied = new LinkedHashMap<>(
+                Objects.requireNonNull(digests, "digests"));
+        copied.forEach((turnId, digest) -> {
+            if (digest == null || !turnId.equals(digest.turnId())) {
+                throw new IllegalArgumentException("digest key and turn id must match");
+            }
+        });
+        return List.copyOf(copied.values());
     }
 
     private static List<TurnHistory> groupAndValidate(List<Message> messages) {

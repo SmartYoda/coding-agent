@@ -11,6 +11,7 @@ import com.yoda.codingagent.core.api.CancellationToken;
 import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
+import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.api.TurnStatus;
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.config.AgentConfig;
@@ -36,6 +37,8 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -63,13 +66,13 @@ class RestartIntegrationTest {
                 new SessionConfig(beta.workspaceId(), limits()));
 
         var firstTurn = run(first, alphaOne, "a1-first-input");
-        run(first, alphaOne, "a1-second-input");
-        run(first, alphaTwo, "a2-private-input");
-        run(first, betaOne, "b1-private-input");
+        var secondTurn = run(first, alphaOne, "a1-second-input");
+        var alphaTwoTurn = run(first, alphaTwo, "a2-private-input");
+        var betaTurn = run(first, betaOne, "b1-private-input");
 
         FinalAnswerModel restartedModel = new FinalAnswerModel(List.of("a1-third-result"));
         TestApplication restarted = application(config, restartedModel);
-        run(restarted, alphaOne, "a1-third-input");
+        var thirdTurn = run(restarted, alphaOne, "a1-third-input");
 
         ModelRequest thirdRequest = restartedModel.requests.getFirst();
         String flattened = thirdRequest.messages().toString();
@@ -80,15 +83,47 @@ class RestartIntegrationTest {
         assertTrue(flattened.contains("a1-third-input"));
         assertFalse(flattened.contains("a2-private-input"));
         assertFalse(flattened.contains("b1-private-input"));
+        String fixedContext = ((Message.SystemMessage) thirdRequest.messages().getFirst())
+                .content();
+        assertTrue(fixedContext.contains(alpha.root().toString()));
+        assertFalse(fixedContext.contains(beta.root().toString()));
+        Set<TurnId> requestTurnIds = thirdRequest.messages().stream()
+                .map(RestartIntegrationTest::turnIdOf)
+                .filter(Objects::nonNull)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        assertEquals(Set.of(firstTurn.turnId(), secondTurn.turnId(), thirdTurn.turnId()),
+                requestTurnIds);
+        assertFalse(requestTurnIds.contains(alphaTwoTurn.turnId()));
+        assertFalse(requestTurnIds.contains(betaTurn.turnId()));
         assertEquals(1, thirdRequest.messages().stream()
                 .filter(Message.SystemMessage.class::isInstance).count());
-        assertEquals(3, restarted.store().loadCanonicalHistory(alphaOne.sessionId())
-                .completedTurns().size());
+        var recoveredHistory = restarted.store().loadCanonicalHistory(alphaOne.sessionId());
+        assertEquals(3, recoveredHistory.completedTurns().size());
+        assertEquals(3, recoveredHistory.digests().size());
         assertEquals(2, restarted.service().listWorkspaces().size());
         var usage = new SqliteStateFixture(config.databasePath())
                 .readFinalStepUsage(firstTurn.turnId());
         assertEquals(11, usage.promptTokens());
         assertEquals(7, usage.completionTokens());
+    }
+
+    private static TurnId turnIdOf(Message message) {
+        if (message instanceof Message.UserMessage user) {
+            return user.turnId();
+        }
+        if (message instanceof Message.AssistantMessage assistant) {
+            return assistant.turnId();
+        }
+        if (message instanceof Message.AssistantToolCallsMessage calls) {
+            return calls.turnId();
+        }
+        if (message instanceof Message.ToolResultMessage result) {
+            return result.turnId();
+        }
+        if (message instanceof Message.TurnDigestMessage digest) {
+            return digest.turnId();
+        }
+        return null;
     }
 
     private static AgentResult run(

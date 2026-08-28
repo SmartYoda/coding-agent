@@ -42,7 +42,8 @@ public final class ContextManager {
         int fixedTokens = estimator.estimateMessages(List.of(fixedMessage));
         int toolTokens = estimator.estimateTools(toolDefinitions);
         int currentTokens = estimator.estimateMessages(current);
-        int required = fixedTokens + toolTokens + currentTokens + policy.reservedOutputTokens();
+        long required = (long) fixedTokens + toolTokens + currentTokens
+                + policy.reservedOutputTokens();
         if (required > policy.maxInputTokens()) {
             throw new AgentException(ErrorCode.CONTEXT_LIMIT,
                     "fixed context, tools, current turn and output reserve exceed the token budget");
@@ -67,17 +68,14 @@ public final class ContextManager {
         selectedNewestFirst.forEach(turn -> fullTurnIds.add(turn.turnId()));
         List<Message.TurnDigestMessage> selectedDigestsNewestFirst = new ArrayList<>();
         int digestTokens = 0;
-        for (int index = completed.size() - 1; index >= 0; index--) {
-            CanonicalHistory.TurnHistory turn = completed.get(index);
-            if (fullTurnIds.contains(turn.turnId())) {
-                continue;
-            }
-            TurnDigest digest = history.digests().get(turn.turnId());
-            if (digest == null) {
+        List<TurnDigest> availableDigests = history.orderedDigests();
+        for (int index = availableDigests.size() - 1; index >= 0; index--) {
+            TurnDigest digest = availableDigests.get(index);
+            if (fullTurnIds.contains(digest.turnId())) {
                 continue;
             }
             Message.TurnDigestMessage digestMessage = new Message.TurnDigestMessage(
-                    turn.turnId(), digest.toContextText());
+                    digest.turnId(), digest.toContextText());
             int candidateTokens = estimator.estimateMessages(List.of(digestMessage));
             if (required + recentTokens + digestTokens + candidateTokens
                     > policy.maxInputTokens()) {
@@ -98,8 +96,11 @@ public final class ContextManager {
         ContextSnapshot.Budget budget = new ContextSnapshot.Budget(
                 fixedTokens, toolTokens, currentTokens, recentTokens, digestTokens,
                 policy.reservedOutputTokens(), policy.maxInputTokens());
+        boolean omittedFullTurn = selectedNewestFirst.size() < completed.size();
+        boolean hasDigestOnlyTurn = availableDigests.stream()
+                .anyMatch(digest -> !fullTurnIds.contains(digest.turnId()));
         return new ContextSnapshot(snapshotMessages, budget,
-                selectedNewestFirst.size() < completed.size());
+                omittedFullTurn || hasDigestOnlyTurn);
     }
 
     private static List<Message> validateCurrentTurn(List<Message> currentTurn) {

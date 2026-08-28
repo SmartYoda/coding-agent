@@ -11,10 +11,6 @@ import java.util.Set;
 
 public final class TurnDigestFactory {
 
-    private static final int TEXT_LIMIT = 500;
-    private static final int ITEM_LIMIT = 200;
-    private static final int MAX_ITEMS = 20;
-
     public TurnDigest create(CanonicalHistory.TurnHistory turn) {
         Message.UserMessage user = (Message.UserMessage) turn.messages().getFirst();
         Message.AssistantMessage assistant =
@@ -29,8 +25,9 @@ public final class TurnDigestFactory {
                 }
             }
         }
-        return new TurnDigest(turn.turnId(), truncate(user.content(), TEXT_LIMIT),
-                TurnStatus.COMPLETED, truncate(assistant.content(), TEXT_LIMIT),
+        return new TurnDigest(turn.turnId(), truncate(user.content(), TurnDigest.TEXT_LIMIT),
+                TurnStatus.COMPLETED,
+                truncate(assistant.content(), TurnDigest.TEXT_LIMIT),
                 limited(filesRead), limited(filesModified), limited(commands),
                 List.of(), List.of());
     }
@@ -45,7 +42,7 @@ public final class TurnDigestFactory {
                 String command = argv.isArray() ? argv.toString()
                         : call.arguments().path("command").asText("");
                 if (!command.isBlank()) {
-                    commands.add(truncate(command, ITEM_LIMIT));
+                    commands.add(truncate(command, TurnDigest.ITEM_LIMIT));
                 }
             }
             default -> {
@@ -57,14 +54,15 @@ public final class TurnDigestFactory {
     private static void addPath(ToolCall call, Set<String> target) {
         String path = call.arguments().path("path").asText("");
         if (!path.isBlank()) {
-            target.add(truncate(path, ITEM_LIMIT));
+            target.add(truncate(path, TurnDigest.ITEM_LIMIT));
         }
     }
 
     private static List<String> limited(Set<String> values) {
-        List<String> result = new ArrayList<>(Math.min(values.size(), MAX_ITEMS));
+        List<String> result = new ArrayList<>(
+                Math.min(values.size(), TurnDigest.MAX_ITEMS));
         for (String value : values) {
-            if (result.size() == MAX_ITEMS) {
+            if (result.size() == TurnDigest.MAX_ITEMS) {
                 break;
             }
             result.add(value);

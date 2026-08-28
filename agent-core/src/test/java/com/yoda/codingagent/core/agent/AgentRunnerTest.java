@@ -110,6 +110,53 @@ class AgentRunnerTest {
     }
 
     @Test
+    void boundsToolOutputBeforeModelFeedbackAndPersistence(@TempDir Path tempDirectory)
+            throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(
+                List.of(new ModelStreamEvent.ResponseStarted("one"),
+                        new ModelStreamEvent.ToolCallDelta(
+                                0, "call-1", "test_large", "{}"),
+                        new ModelStreamEvent.ResponseFinished("tool_calls"),
+                        new ModelStreamEvent.StreamEnded()),
+                List.of(new ModelStreamEvent.ResponseStarted("two"),
+                        new ModelStreamEvent.TextDelta("done"),
+                        new ModelStreamEvent.ResponseFinished("stop"),
+                        new ModelStreamEvent.StreamEnded())));
+        ObjectNode schema = objectMapper.createObjectNode().put("type", "object");
+        Tool largeTool = new Tool() {
+            @Override
+            public ToolDefinition definition() {
+                return new ToolDefinition("test_large", "Return large output", schema);
+            }
+
+            @Override
+            public ToolResult execute(ToolContext context, ObjectNode arguments) {
+                return ToolResult.success("x".repeat(20_000));
+            }
+        };
+        RunLimits boundedLimits = new RunLimits(4, Duration.ofMinutes(2),
+                Duration.ofSeconds(30), Duration.ofSeconds(10),
+                1_024, 8_192, 1_024, 2);
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(largeTool)), null, boundedLimits);
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("large"), ignored -> { }, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        Message.ToolResultMessage feedback = (Message.ToolResultMessage) model.requests.get(1)
+                .messages().stream().filter(Message.ToolResultMessage.class::isInstance)
+                .findFirst().orElseThrow();
+        assertEquals(1_024, feedback.content().length());
+        assertTrue(feedback.result().truncated());
+        Message.ToolResultMessage persisted = (Message.ToolResultMessage) application.store()
+                .loadCanonicalHistory(application.session().sessionId()).messages().stream()
+                .filter(Message.ToolResultMessage.class::isInstance)
+                .findFirst().orElseThrow();
+        assertEquals(feedback.result(), persisted.result());
+    }
+
+    @Test
     void beginTurnStorageFailureCallsNeitherModelNorTool(@TempDir Path tempDirectory)
             throws Exception {
         ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
@@ -216,6 +263,14 @@ class AgentRunnerTest {
                                         ToolRegistry tools,
                                         FailingStateStore.FailurePoint failurePoint)
             throws Exception {
+        return application(tempDirectory, model, tools, failurePoint, limits());
+    }
+
+    private TestApplication application(Path tempDirectory, ModelClient model,
+                                        ToolRegistry tools,
+                                        FailingStateStore.FailurePoint failurePoint,
+                                        RunLimits runLimits)
+            throws Exception {
         AgentConfig config = new AgentConfigLoader().load(Map.of(
                 "apiKey", "test-key",
                 "dataDirectory", tempDirectory.resolve("state").toString()), Map.of());
@@ -234,7 +289,7 @@ class AgentRunnerTest {
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
                 DefaultAgentService.DEFAULT_SYSTEM_PROMPT);
         SessionDescriptor session = service.openSession(
-                new SessionConfig(workspace.workspaceId(), limits()));
+                new SessionConfig(workspace.workspaceId(), runLimits));
         return new TestApplication(config, store, service, session);
     }
 

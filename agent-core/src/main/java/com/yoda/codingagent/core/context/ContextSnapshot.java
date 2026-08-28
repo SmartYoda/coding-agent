@@ -30,7 +30,7 @@ public record ContextSnapshot(
         public Budget {
             if (fixedTokens < 0 || toolTokens < 0 || currentTokens < 0
                     || recentTokens < 0 || digestTokens < 0 || reservedOutputTokens < 0
-                    || maxInputTokens < 1 || totalWithReserve(fixedTokens, toolTokens,
+                    || maxInputTokens < 1 || totalWithReserveExact(fixedTokens, toolTokens,
                     currentTokens, recentTokens, digestTokens, reservedOutputTokens)
                     > maxInputTokens) {
                 throw new IllegalArgumentException("invalid context budget");
@@ -38,16 +38,17 @@ public record ContextSnapshot(
         }
 
         public int estimatedInputTokens() {
-            return fixedTokens + toolTokens + currentTokens + recentTokens + digestTokens;
+            return Math.addExact(Math.addExact(Math.addExact(Math.addExact(
+                    fixedTokens, toolTokens), currentTokens), recentTokens), digestTokens);
         }
 
         public int totalWithReserve() {
-            return estimatedInputTokens() + reservedOutputTokens;
+            return Math.addExact(estimatedInputTokens(), reservedOutputTokens);
         }
 
-        private static int totalWithReserve(int fixed, int tools, int current,
-                                            int recent, int digest, int reserve) {
-            return fixed + tools + current + recent + digest + reserve;
+        private static long totalWithReserveExact(int fixed, int tools, int current,
+                                                  int recent, int digest, int reserve) {
+            return (long) fixed + tools + current + recent + digest + reserve;
         }
     }
 }

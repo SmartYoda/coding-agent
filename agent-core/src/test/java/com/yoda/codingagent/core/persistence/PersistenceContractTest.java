@@ -5,12 +5,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.yoda.codingagent.core.api.AgentResult;
 import com.yoda.codingagent.core.api.ErrorCode;
+import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionStatus;
 import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.api.TurnStatus;
 import com.yoda.codingagent.core.api.WorkspaceStatus;
 import com.yoda.codingagent.core.model.MessageKind;
 import com.yoda.codingagent.core.model.MessageRole;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -52,6 +54,13 @@ class PersistenceContractTest {
                                 ErrorCode.INTERNAL_ERROR, "failed"));
             }
         }
+    }
+
+    @Test
+    void recentFullTurnLimitHasAnExplicitMemorySafetyBound() {
+        assertThrows(IllegalArgumentException.class, () -> new RunLimits(
+                4, Duration.ofMinutes(2), Duration.ofSeconds(30), Duration.ofSeconds(10),
+                16_384, 8_192, 1_024, RunLimits.MAX_RECENT_FULL_TURNS + 1));
     }
 
     private static Set<String> names(Enum<?>[] values) {

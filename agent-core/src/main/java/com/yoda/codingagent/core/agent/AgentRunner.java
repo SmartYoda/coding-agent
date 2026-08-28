@@ -123,7 +123,7 @@ public final class AgentRunner {
                     ToolResult result = executeTool(call, session, turn, cancellationToken, events);
                     stateStore.recordToolResult(step, call, result);
                     resultMessages.add(new Message.ToolResultMessage(
-                            turn.turnId(), call.callId(), result.output()));
+                            turn.turnId(), call.callId(), result));
                 }
                 stateStore.commitToolStep(step);
                 currentTurn.add(new Message.AssistantToolCallsMessage(
@@ -171,6 +171,7 @@ public final class AgentRunner {
         if (duration.isNegative()) {
             duration = Duration.ZERO;
         }
+        duration = Duration.ofMillis(duration.toMillis());
         result = result.withDuration(duration);
         result = boundToolResult(result, session.limits().maxToolOutputChars());
         events.toolCompleted(call.callId(), call.name(), result.success());

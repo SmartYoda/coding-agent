@@ -215,9 +215,9 @@ public final class OpenAiCompatibleChatModelClient implements ModelClient {
             } else if (message instanceof Message.ToolResultMessage toolResult) {
                 encoded.put("role", "tool");
                 encoded.put("tool_call_id", toolResult.callId());
-                encoded.put("content", toolResult.content());
+                encoded.put("content", writeToolResult(toolResult));
             } else if (message instanceof Message.TurnDigestMessage digest) {
-                encoded.put("role", "system");
+                encoded.put("role", "assistant");
                 encoded.put("content", digest.content());
             }
         }
@@ -243,6 +243,27 @@ public final class OpenAiCompatibleChatModelClient implements ModelClient {
         } catch (JsonProcessingException exception) {
             throw new AgentException(ErrorCode.INTERNAL_ERROR,
                     "could not encode tool arguments", exception);
+        }
+    }
+
+    private String writeToolResult(Message.ToolResultMessage message) {
+        ObjectNode encoded = objectMapper.createObjectNode();
+        encoded.put("status", message.result().status().name());
+        encoded.put("output", message.result().output());
+        if (message.result().errorCode() == null) {
+            encoded.putNull("errorCode");
+        } else {
+            encoded.put("errorCode", message.result().errorCode().name());
+        }
+        encoded.put("truncated", message.result().truncated());
+        encoded.put("durationMs", message.result().duration().toMillis());
+        ObjectNode metadata = encoded.putObject("metadata");
+        message.result().metadata().forEach(metadata::put);
+        try {
+            return objectMapper.writeValueAsString(encoded);
+        } catch (JsonProcessingException exception) {
+            throw new AgentException(ErrorCode.INTERNAL_ERROR,
+                    "could not encode tool result", exception);
         }
     }
 

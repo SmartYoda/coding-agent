@@ -36,6 +36,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -50,6 +51,7 @@ public final class SqliteStateStore implements StateStore {
 
     private static final String MIGRATION_LOCATION = "classpath:db/migration";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final int MAX_DIGESTS_LOADED = 512;
 
     private final SQLiteDataSource dataSource;
     private final Path databasePath;
@@ -338,13 +340,22 @@ public final class SqliteStateStore implements StateStore {
         Objects.requireNonNull(sessionId, "sessionId");
         return withConnection(connection -> {
             WorkspaceId workspaceId = findSessionWorkspace(connection, sessionId);
+            RunLimits limits = findSessionLimits(connection, sessionId);
+            int recentFullTurns = limits.recentFullTurns();
             Map<String, List<ToolCall>> toolCallsByStep = loadCommittedToolCalls(
-                    connection, sessionId);
-            Map<TurnId, TurnDigest> digests = loadTurnDigests(connection, sessionId);
+                    connection, sessionId, recentFullTurns);
+            List<TurnDigest> digests = loadTurnDigests(
+                    connection, sessionId, MAX_DIGESTS_LOADED);
             List<Message> messages = new ArrayList<>();
             try (PreparedStatement statement = connection.prepareStatement("""
                     SELECT m.turn_id, m.model_step_id, m.role, m.kind, m.content,
-                           tc.call_id AS protocol_call_id
+                           tc.call_id AS protocol_call_id,
+                           tc.execution_status AS tool_execution_status,
+                           tc.result_output AS tool_result_output,
+                           tc.result_error_code AS tool_result_error_code,
+                           tc.result_truncated AS tool_result_truncated,
+                           tc.duration_ms AS tool_duration_ms,
+                           tc.result_metadata_json AS tool_result_metadata_json
                     FROM messages m
                     LEFT JOIN turns t ON t.id = m.turn_id
                     LEFT JOIN model_steps ms ON ms.id = m.model_step_id
@@ -353,13 +364,22 @@ public final class SqliteStateStore implements StateStore {
                       AND (
                         m.turn_id IS NULL
                         OR (
-                          t.status = 'COMPLETED'
+                          m.turn_id IN (
+                            SELECT recent.id
+                            FROM turns recent
+                            WHERE recent.session_id = ? AND recent.status = 'COMPLETED'
+                            ORDER BY recent.turn_no DESC
+                            LIMIT ?
+                          )
+                          AND t.status = 'COMPLETED'
                           AND (m.model_step_id IS NULL OR ms.status = 'COMMITTED')
                         )
                       )
                     ORDER BY m.sequence_no
                     """)) {
                 statement.setString(1, sessionId.value().toString());
+                statement.setString(2, sessionId.value().toString());
+                statement.setInt(3, recentFullTurns);
                 try (ResultSet resultSet = statement.executeQuery()) {
                     while (resultSet.next()) {
                         messages.add(mapMessage(resultSet, toolCallsByStep));
@@ -968,6 +988,18 @@ public final class SqliteStateStore implements StateStore {
         };
     }
 
+    private static ToolStatus modelVisibleStatus(ToolExecutionStatus status) {
+        return switch (status) {
+            case SUCCESS -> ToolStatus.SUCCESS;
+            case FAILURE -> ToolStatus.FAILURE;
+            case DENIED -> ToolStatus.DENIED;
+            case TIMED_OUT -> ToolStatus.TIMED_OUT;
+            case CANCELLED -> ToolStatus.CANCELLED;
+            case PENDING, EXECUTING, UNKNOWN -> throw new IllegalArgumentException(
+                    "unfinished tool call cannot enter canonical history");
+        };
+    }
+
     private boolean hasOpenSession(Connection connection, WorkspaceId workspaceId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
@@ -1036,8 +1068,24 @@ public final class SqliteStateStore implements StateStore {
         }
     }
 
+    private RunLimits findSessionLimits(Connection connection, SessionId sessionId)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT limits_json FROM sessions WHERE id = ?")) {
+            statement.setString(1, sessionId.value().toString());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    throw new AgentException(ErrorCode.UNKNOWN_SESSION,
+                            "session does not exist");
+                }
+                return deserializeLimits(resultSet.getString(1));
+            }
+        }
+    }
+
     private Map<String, List<ToolCall>> loadCommittedToolCalls(
-            Connection connection, SessionId sessionId) throws SQLException {
+            Connection connection, SessionId sessionId, int recentFullTurns)
+            throws SQLException {
         Map<String, List<ToolCall>> callsByStep = new LinkedHashMap<>();
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT tc.model_step_id, tc.call_id, tc.name, tc.arguments_json
@@ -1047,9 +1095,18 @@ public final class SqliteStateStore implements StateStore {
                 WHERE t.session_id = ?
                   AND t.status = 'COMPLETED'
                   AND ms.status = 'COMMITTED'
+                  AND t.id IN (
+                    SELECT recent.id
+                    FROM turns recent
+                    WHERE recent.session_id = ? AND recent.status = 'COMPLETED'
+                    ORDER BY recent.turn_no DESC
+                    LIMIT ?
+                  )
                 ORDER BY t.turn_no, ms.step_no, tc.ordinal
                 """)) {
             statement.setString(1, sessionId.value().toString());
+            statement.setString(2, sessionId.value().toString());
+            statement.setInt(3, recentFullTurns);
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (resultSet.next()) {
                     String stepId = resultSet.getString("model_step_id");
@@ -1066,29 +1123,32 @@ public final class SqliteStateStore implements StateStore {
         return Map.copyOf(callsByStep);
     }
 
-    private Map<TurnId, TurnDigest> loadTurnDigests(Connection connection, SessionId sessionId)
-            throws SQLException {
-        Map<TurnId, TurnDigest> digests = new LinkedHashMap<>();
+    private List<TurnDigest> loadTurnDigests(Connection connection, SessionId sessionId,
+                                             int maximumDigests) throws SQLException {
+        List<TurnDigest> newestFirst = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT d.turn_id, d.digest_json
                 FROM turn_digests d
                 JOIN turns t ON t.id = d.turn_id
                 WHERE t.session_id = ? AND t.status = 'COMPLETED'
-                ORDER BY t.turn_no
+                ORDER BY t.turn_no DESC
+                LIMIT ?
                 """)) {
             statement.setString(1, sessionId.value().toString());
+            statement.setInt(2, maximumDigests);
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (resultSet.next()) {
                     TurnId turnId = new TurnId(UUID.fromString(resultSet.getString("turn_id")));
                     TurnDigest digest = deserializeDigest(turnId,
                             resultSet.getString("digest_json"));
-                    digests.put(turnId, digest);
+                    newestFirst.add(digest);
                 }
             }
         } catch (IllegalArgumentException | NullPointerException exception) {
             throw storageFailure("state database contains an invalid turn digest", exception);
         }
-        return Map.copyOf(digests);
+        java.util.Collections.reverse(newestFirst);
+        return List.copyOf(newestFirst);
     }
 
     private Message mapMessage(ResultSet resultSet,
@@ -1117,8 +1177,30 @@ public final class SqliteStateStore implements StateStore {
                 return new Message.AssistantToolCallsMessage(turnId, content, calls);
             }
             if ("TOOL".equals(role) && "TOOL_RESULT".equals(kind)) {
+                ToolExecutionStatus executionStatus = ToolExecutionStatus.valueOf(
+                        resultSet.getString("tool_execution_status"));
+                ToolStatus toolStatus = modelVisibleStatus(executionStatus);
+                String output = resultSet.getString("tool_result_output");
+                if (!Objects.equals(content, output)) {
+                    throw new IllegalArgumentException(
+                            "tool message content does not match its result");
+                }
+                String errorName = resultSet.getString("tool_result_error_code");
+                ErrorCode errorCode = errorName == null ? null : ErrorCode.valueOf(errorName);
+                long durationMillis = resultSet.getLong("tool_duration_ms");
+                if (resultSet.wasNull()) {
+                    throw new IllegalArgumentException("tool result duration is missing");
+                }
+                int truncatedValue = resultSet.getInt("tool_result_truncated");
+                if (truncatedValue != 0 && truncatedValue != 1) {
+                    throw new IllegalArgumentException("tool result truncated flag is invalid");
+                }
+                ToolResult result = new ToolResult(toolStatus, output, errorCode,
+                        truncatedValue == 1,
+                        Duration.ofMillis(durationMillis),
+                        deserializeMetadata(resultSet.getString("tool_result_metadata_json")));
                 return new Message.ToolResultMessage(turnId,
-                        resultSet.getString("protocol_call_id"), content);
+                        resultSet.getString("protocol_call_id"), result);
             }
             throw new IllegalArgumentException("unknown message role and kind");
         } catch (IllegalArgumentException | NullPointerException exception) {
@@ -1267,6 +1349,30 @@ public final class SqliteStateStore implements StateStore {
             return OBJECT_MAPPER.writeValueAsString(metadata);
         } catch (JsonProcessingException exception) {
             throw storageFailure("cannot serialize tool result metadata", exception);
+        }
+    }
+
+    private static Map<String, String> deserializeMetadata(String metadataJson) {
+        if (metadataJson == null) {
+            return Map.of();
+        }
+        try {
+            JsonNode json = OBJECT_MAPPER.readTree(metadataJson);
+            if (json == null || !json.isObject()) {
+                throw new IllegalArgumentException("tool result metadata must be an object");
+            }
+            Map<String, String> metadata = new LinkedHashMap<>();
+            json.properties().forEach(entry -> {
+                if (!entry.getValue().isTextual()) {
+                    throw new IllegalArgumentException(
+                            "tool result metadata values must be strings");
+                }
+                metadata.put(entry.getKey(), entry.getValue().textValue());
+            });
+            return Map.copyOf(metadata);
+        } catch (JsonProcessingException exception) {
+            throw storageFailure("state database contains invalid tool result metadata",
+                    exception);
         }
     }
 

@@ -106,6 +106,14 @@ class ContextManagerTest {
                 new Message.AssistantMessage(turnId, "done"))));
     }
 
+    @Test
+    void rejectsOverflowingBudgetsAndExcessiveRecentTurnWindows() {
+        assertThrows(IllegalArgumentException.class, () -> new ContextSnapshot.Budget(
+                Integer.MAX_VALUE, 1, 0, 0, 0, 1, Integer.MAX_VALUE));
+        assertThrows(IllegalArgumentException.class, () -> new ContextBudgetPolicy(
+                4096, 512, com.yoda.codingagent.core.api.RunLimits.MAX_RECENT_FULL_TURNS + 1));
+    }
+
     private ObjectNode arguments(String path) {
         return objectMapper.createObjectNode().put("path", path);
     }

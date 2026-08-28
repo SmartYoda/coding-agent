@@ -1,8 +1,10 @@
 package com.yoda.codingagent.core.persistence.sqlite;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.yoda.codingagent.core.agent.DefaultAgentService;
 import com.yoda.codingagent.core.api.ErrorCode;
@@ -16,6 +18,7 @@ import com.yoda.codingagent.core.config.AgentConfigLoader;
 import com.yoda.codingagent.core.context.CanonicalHistory;
 import com.yoda.codingagent.core.error.AgentException;
 import com.yoda.codingagent.core.model.Message;
+import com.yoda.codingagent.core.tool.ToolStatus;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -38,6 +41,7 @@ class CanonicalHistoryStoreTest {
         TurnId turnId = TurnId.random();
         SqliteStateFixture fixture = new SqliteStateFixture(config.databasePath());
         fixture.insertCompletedToolTurn(session.sessionId(), turnId);
+        fixture.clearFirstToolMetadata(turnId);
         fixture.insertDigest(turnId);
 
         CanonicalHistory history = SqliteStateStore.open(config)
@@ -57,6 +61,9 @@ class CanonicalHistoryStoreTest {
                 (Message.ToolResultMessage) history.messages().get(3);
         assertEquals("call-read", result.callId());
         assertEquals("file-content", result.content());
+        assertEquals(ToolStatus.SUCCESS, result.result().status());
+        assertEquals(Duration.ofMillis(5), result.result().duration());
+        assertEquals(Map.of(), result.result().metadata());
     }
 
     @Test
@@ -73,6 +80,47 @@ class CanonicalHistoryStoreTest {
         AgentException exception = assertThrows(AgentException.class,
                 () -> store.loadCanonicalHistory(session.sessionId()));
         assertEquals(ErrorCode.STORAGE_ERROR, exception.errorCode());
+    }
+
+    @Test
+    void unfinishedPersistedToolCallCannotBecomeModelVisible(@TempDir Path tempDirectory)
+            throws Exception {
+        AgentConfig config = config(tempDirectory);
+        SqliteStateStore store = SqliteStateStore.open(config);
+        WorkspaceDescriptor workspace = store.registerWorkspace("Workspace",
+                Files.createDirectory(tempDirectory.resolve("workspace")));
+        SessionDescriptor session = store.createSessionWithSystemMessage(
+                new SessionConfig(workspace.workspaceId(), limits()), "system");
+        TurnId turnId = TurnId.random();
+        SqliteStateFixture fixture = new SqliteStateFixture(config.databasePath());
+        fixture.insertCompletedToolTurn(session.sessionId(), turnId);
+        fixture.markFirstToolCallUnknown(turnId);
+
+        AgentException exception = assertThrows(AgentException.class,
+                () -> store.loadCanonicalHistory(session.sessionId()));
+
+        assertEquals(ErrorCode.STORAGE_ERROR, exception.errorCode());
+    }
+
+    @Test
+    void loadsOnlyRecentFullTurnsAndABoundedDigestWindow(@TempDir Path tempDirectory)
+            throws Exception {
+        AgentConfig config = config(tempDirectory);
+        SqliteStateStore store = SqliteStateStore.open(config);
+        WorkspaceDescriptor workspace = store.registerWorkspace("Workspace",
+                Files.createDirectory(tempDirectory.resolve("workspace")));
+        SessionDescriptor session = store.createSessionWithSystemMessage(
+                new SessionConfig(workspace.workspaceId(), limits()), "system");
+        SqliteStateFixture fixture = new SqliteStateFixture(config.databasePath());
+        var turnIds = fixture.insertCompletedTextTurns(session.sessionId(), 520);
+
+        CanonicalHistory history = store.loadCanonicalHistory(session.sessionId());
+
+        assertEquals(2, history.completedTurns().size());
+        assertEquals(5, history.messages().size());
+        assertEquals(512, history.orderedDigests().size());
+        assertFalse(history.digests().containsKey(turnIds.getFirst()));
+        assertTrue(history.digests().containsKey(turnIds.getLast()));
     }
 
     private static AgentConfig config(Path tempDirectory) {

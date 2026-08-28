@@ -14,13 +14,16 @@ public record RunLimits(
         int recentFullTurns
 ) {
 
+    public static final int MAX_RECENT_FULL_TURNS = 32;
+
     public RunLimits {
         if (maxSteps < 1 || maxToolOutputChars < 1 || maxInputTokens < 1
                 || reservedOutputTokens < 1) {
             throw new IllegalArgumentException("run limits must be positive");
         }
-        if (recentFullTurns < 0) {
-            throw new IllegalArgumentException("recentFullTurns must not be negative");
+        if (recentFullTurns < 0 || recentFullTurns > MAX_RECENT_FULL_TURNS) {
+            throw new IllegalArgumentException(
+                    "recentFullTurns must be between 0 and " + MAX_RECENT_FULL_TURNS);
         }
         if (reservedOutputTokens >= maxInputTokens) {
             throw new IllegalArgumentException(
