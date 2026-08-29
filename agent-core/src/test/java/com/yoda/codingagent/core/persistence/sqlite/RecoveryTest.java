@@ -27,7 +27,8 @@ class RecoveryTest {
         AgentConfig config = new AgentConfigLoader().load(Map.of(
                 "apiKey", "test-key",
                 "dataDirectory", tempDirectory.resolve("state").toString()), Map.of());
-        SqliteStateStore first = SqliteStateStore.open(config);
+        SqliteStateStore first = SqliteStateStore.open(
+                config.databasePath(), config.databaseBusyTimeout());
         WorkspaceDescriptor workspace = first.registerWorkspace("Workspace",
                 Files.createDirectory(tempDirectory.resolve("workspace")));
         SessionDescriptor session = first.createSessionWithSystemMessage(
@@ -36,7 +37,8 @@ class RecoveryTest {
         SqliteStateFixture fixture = new SqliteStateFixture(config.databasePath());
         fixture.insertRecoverableToolTurn(session.sessionId(), turnId);
 
-        SqliteStateStore recovered = SqliteStateStore.open(config);
+        SqliteStateStore recovered = SqliteStateStore.open(
+                config.databasePath(), config.databaseBusyTimeout());
         SqliteStateFixture.RecoveryState state = fixture.readRecoveryState(turnId);
         assertEquals("INTERRUPTED", state.turnStatus());
         assertEquals("ABORTED", state.stepStatus());

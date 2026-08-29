@@ -32,7 +32,7 @@ class CanonicalHistoryStoreTest {
     void restoresOnlyCommittedCanonicalMessagesAndToolProtocol(@TempDir Path tempDirectory)
             throws Exception {
         AgentConfig config = config(tempDirectory);
-        SqliteStateStore store = SqliteStateStore.open(config);
+        SqliteStateStore store = open(config);
         Path root = Files.createDirectory(tempDirectory.resolve("workspace"));
         WorkspaceDescriptor workspace = store.registerWorkspace("Workspace", root);
         SessionDescriptor session = store.createSessionWithSystemMessage(
@@ -44,7 +44,7 @@ class CanonicalHistoryStoreTest {
         fixture.clearFirstToolMetadata(turnId);
         fixture.insertDigest(turnId);
 
-        CanonicalHistory history = SqliteStateStore.open(config)
+        CanonicalHistory history = open(config)
                 .loadCanonicalHistory(session.sessionId());
 
         assertEquals(session.sessionId(), history.sessionId());
@@ -70,7 +70,7 @@ class CanonicalHistoryStoreTest {
     void unknownDatabaseMessageCombinationBecomesStorageError(@TempDir Path tempDirectory)
             throws Exception {
         AgentConfig config = config(tempDirectory);
-        SqliteStateStore store = SqliteStateStore.open(config);
+        SqliteStateStore store = open(config);
         Path root = Files.createDirectory(tempDirectory.resolve("workspace"));
         WorkspaceDescriptor workspace = store.registerWorkspace("Workspace", root);
         SessionDescriptor session = store.createSessionWithSystemMessage(
@@ -86,7 +86,7 @@ class CanonicalHistoryStoreTest {
     void unfinishedPersistedToolCallCannotBecomeModelVisible(@TempDir Path tempDirectory)
             throws Exception {
         AgentConfig config = config(tempDirectory);
-        SqliteStateStore store = SqliteStateStore.open(config);
+        SqliteStateStore store = open(config);
         WorkspaceDescriptor workspace = store.registerWorkspace("Workspace",
                 Files.createDirectory(tempDirectory.resolve("workspace")));
         SessionDescriptor session = store.createSessionWithSystemMessage(
@@ -106,7 +106,7 @@ class CanonicalHistoryStoreTest {
     void loadsOnlyRecentFullTurnsAndABoundedDigestWindow(@TempDir Path tempDirectory)
             throws Exception {
         AgentConfig config = config(tempDirectory);
-        SqliteStateStore store = SqliteStateStore.open(config);
+        SqliteStateStore store = open(config);
         WorkspaceDescriptor workspace = store.registerWorkspace("Workspace",
                 Files.createDirectory(tempDirectory.resolve("workspace")));
         SessionDescriptor session = store.createSessionWithSystemMessage(
@@ -127,6 +127,10 @@ class CanonicalHistoryStoreTest {
         return new AgentConfigLoader().load(Map.of(
                 "apiKey", "test-key",
                 "dataDirectory", tempDirectory.resolve("state").toString()), Map.of());
+    }
+
+    private static SqliteStateStore open(AgentConfig config) {
+        return SqliteStateStore.open(config.databasePath(), config.databaseBusyTimeout());
     }
 
     private static RunLimits limits() {

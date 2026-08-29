@@ -13,12 +13,15 @@ import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.api.WorkspaceStatus;
 import com.yoda.codingagent.core.config.AgentConfig;
 import com.yoda.codingagent.core.config.AgentConfigLoader;
+import com.yoda.codingagent.core.config.SecretRedactor;
 import com.yoda.codingagent.core.context.ContextManager;
 import com.yoda.codingagent.core.context.TokenEstimator;
 import com.yoda.codingagent.core.context.TurnDigestFactory;
 import com.yoda.codingagent.core.error.AgentException;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
 import com.yoda.codingagent.core.tool.ToolRegistry;
+import com.yoda.codingagent.core.tool.ToolDispatcher;
+import com.yoda.codingagent.core.tool.ToolOutputTruncator;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -92,7 +95,9 @@ class WorkspaceServiceTest {
                 () -> restartedApplication.registry().activeContext(workspace.workspaceId()));
         assertEquals(ErrorCode.WORKSPACE_UNAVAILABLE, exception.errorCode());
 
-        SqliteStateStore independentlyReopened = SqliteStateStore.open(firstApplication.config());
+        SqliteStateStore independentlyReopened = SqliteStateStore.open(
+                firstApplication.config().databasePath(),
+                firstApplication.config().databaseBusyTimeout());
         assertEquals(WorkspaceStatus.UNAVAILABLE,
                 independentlyReopened.listWorkspaces().getFirst().status());
     }
@@ -101,13 +106,16 @@ class WorkspaceServiceTest {
         AgentConfig config = new AgentConfigLoader().load(Map.of(
                 "apiKey", "test-key",
                 "dataDirectory", tempDirectory.resolve("state").toString()), Map.of());
-        SqliteStateStore stateStore = SqliteStateStore.open(config);
+        SqliteStateStore stateStore = SqliteStateStore.open(
+                config.databasePath(), config.databaseBusyTimeout());
         WorkspaceRegistry registry = new WorkspaceRegistry(stateStore,
                 new WorkspaceResolver(config.dataDirectory()));
         SessionRegistry sessionRegistry = new SessionRegistry(stateStore, registry);
         AgentRunner runner = new AgentRunner((request, sink, token) -> {
             throw new AssertionError("model must not be called by workspace tests");
-        }, new ToolRegistry(List.of()), new ObjectMapper(), config.model(),
+        }, new ToolDispatcher(new ToolRegistry(List.of()),
+                new SecretRedactor(config.apiKey())::redact, new ToolOutputTruncator()),
+                new ObjectMapper(), config.model(),
                 config.maxResponseCharacters(), stateStore,
                 new ContextManager(new TokenEstimator()), new TurnDigestFactory());
         return new TestApplication(config, registry, new DefaultAgentService(

@@ -2,10 +2,11 @@ package com.yoda.codingagent.core.context;
 
 import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.TurnId;
+import com.yoda.codingagent.core.api.WorkspaceId;
 import com.yoda.codingagent.core.error.AgentException;
 import com.yoda.codingagent.core.model.Message;
 import com.yoda.codingagent.core.tool.ToolDefinition;
-import com.yoda.codingagent.core.workspace.WorkspaceContext;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -22,23 +23,26 @@ public final class ContextManager {
     }
 
     public ContextSnapshot buildSnapshot(CanonicalHistory history,
-                                         WorkspaceContext workspace,
+                                         WorkspaceId workspaceId,
+                                         Path workspaceRoot,
                                          List<Message> currentTurn,
                                          List<ToolDefinition> tools,
                                          ContextBudgetPolicy policy) {
         Objects.requireNonNull(history, "history");
-        Objects.requireNonNull(workspace, "workspace");
+        Objects.requireNonNull(workspaceId, "workspaceId");
+        Path root = Objects.requireNonNull(workspaceRoot, "workspaceRoot")
+                .toAbsolutePath().normalize();
         List<Message> current = validateCurrentTurn(currentTurn);
         List<ToolDefinition> toolDefinitions = List.copyOf(
                 Objects.requireNonNull(tools, "tools"));
         Objects.requireNonNull(policy, "policy");
-        if (!history.workspaceId().equals(workspace.workspaceId())) {
+        if (!history.workspaceId().equals(workspaceId)) {
             throw new IllegalArgumentException("history and workspace do not match");
         }
 
         Message.SystemMessage fixedMessage = new Message.SystemMessage(
                 history.systemMessage().content()
-                        + "\nCurrent workspace root: " + workspace.root());
+                        + "\nCurrent workspace root: " + root);
         int fixedTokens = estimator.estimateMessages(List.of(fixedMessage));
         int toolTokens = estimator.estimateTools(toolDefinitions);
         int currentTokens = estimator.estimateMessages(current);

@@ -5,7 +5,6 @@ import com.yoda.codingagent.core.api.WorkspaceId;
 import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.TurnStatus;
 import com.yoda.codingagent.core.api.TurnId;
-import com.yoda.codingagent.core.agent.AgentTurn;
 import com.yoda.codingagent.core.context.CanonicalHistory;
 import com.yoda.codingagent.core.context.TurnDigest;
 import com.yoda.codingagent.core.model.ModelResponse;
@@ -16,6 +15,7 @@ import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
 import com.yoda.codingagent.core.api.SessionId;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
@@ -39,11 +39,11 @@ public interface StateStore {
 
     CanonicalHistory loadCanonicalHistory(SessionId sessionId);
 
-    void beginTurn(AgentTurn turn, String userInput);
+    void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt, String userInput);
 
-    void markTurnStreaming(AgentTurn turn);
+    void markTurnStreaming(TurnId turnId);
 
-    StagedModelStep stageToolStep(AgentTurn turn, ModelResponse response,
+    StagedModelStep stageToolStep(TurnId turnId, int stepNo, ModelResponse response,
                                   int contextEstimatedTokens);
 
     void markToolExecuting(StagedModelStep step, ToolCall call);
@@ -52,10 +52,10 @@ public interface StateStore {
 
     void commitToolStep(StagedModelStep step);
 
-    void completeTurn(AgentTurn turn, ModelResponse response,
+    void completeTurn(TurnId turnId, int stepNo, ModelResponse response,
                       int contextEstimatedTokens, TurnDigest digest);
 
-    void failTurn(AgentTurn turn, TurnStatus status, ErrorCode reason);
+    void failTurn(TurnId turnId, TurnStatus status, ErrorCode reason);
 
     RecoverySummary recoverInterruptedTurns();
 

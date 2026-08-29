@@ -32,7 +32,7 @@ class SqliteStateStoreTest {
         AgentConfig config = config(dataDirectory, 1375);
         assertFalse(Files.exists(dataDirectory));
 
-        SqliteStateStore firstStore = SqliteStateStore.open(config);
+        SqliteStateStore firstStore = open(config);
         WorkspaceDescriptor alpha = firstStore.registerWorkspace("Alpha",
                 tempDirectory.resolve("alpha"));
         WorkspaceDescriptor beta = firstStore.registerWorkspace(" Beta ",
@@ -44,14 +44,14 @@ class SqliteStateStoreTest {
         assertEquals(WorkspaceStatus.ACTIVE, alpha.status());
         assertEquals(List.of(alpha, beta), firstStore.listWorkspaces());
 
-        SqliteStateStore reopenedStore = SqliteStateStore.open(config);
+        SqliteStateStore reopenedStore = open(config);
         assertEquals(List.of(alpha, beta), reopenedStore.listWorkspaces());
         assertEquals("wal", journalMode(config.databasePath()));
     }
 
     @Test
     void archivesIdempotentlyAndRejectsUnknownWorkspace(@TempDir Path tempDirectory) {
-        SqliteStateStore store = SqliteStateStore.open(config(tempDirectory, 5000));
+        SqliteStateStore store = open(config(tempDirectory, 5000));
         WorkspaceDescriptor workspace = store.registerWorkspace("Workspace",
                 tempDirectory.resolve("workspace"));
 
@@ -70,7 +70,7 @@ class SqliteStateStoreTest {
     @Test
     void duplicateRootBecomesStorageErrorAndDoesNotPoisonLaterOperations(
             @TempDir Path tempDirectory) {
-        SqliteStateStore store = SqliteStateStore.open(config(tempDirectory, 5000));
+        SqliteStateStore store = open(config(tempDirectory, 5000));
         Path repeatedRoot = tempDirectory.resolve("same-root");
         store.registerWorkspace("First", repeatedRoot);
 
@@ -91,6 +91,10 @@ class SqliteStateStoreTest {
                 "apiKey", "test-key",
                 "dataDirectory", dataDirectory.toString(),
                 "databaseBusyTimeout", Integer.toString(busyTimeoutMillis)), Map.of());
+    }
+
+    private static SqliteStateStore open(AgentConfig config) {
+        return SqliteStateStore.open(config.databasePath(), config.databaseBusyTimeout());
     }
 
     private static String journalMode(Path databasePath) throws Exception {

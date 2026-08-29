@@ -16,6 +16,7 @@ import com.yoda.codingagent.core.api.TurnStatus;
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.config.AgentConfig;
 import com.yoda.codingagent.core.config.AgentConfigLoader;
+import com.yoda.codingagent.core.config.SecretRedactor;
 import com.yoda.codingagent.core.context.ContextManager;
 import com.yoda.codingagent.core.context.TokenEstimator;
 import com.yoda.codingagent.core.context.TurnDigestFactory;
@@ -27,6 +28,8 @@ import com.yoda.codingagent.core.model.ModelStreamSink;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateFixture;
 import com.yoda.codingagent.core.tool.ToolRegistry;
+import com.yoda.codingagent.core.tool.ToolDispatcher;
+import com.yoda.codingagent.core.tool.ToolOutputTruncator;
 import com.yoda.codingagent.core.workspace.WorkspaceRegistry;
 import com.yoda.codingagent.core.workspace.WorkspaceResolver;
 import java.nio.file.Files;
@@ -135,11 +138,14 @@ class RestartIntegrationTest {
     }
 
     private static TestApplication application(AgentConfig config, ModelClient model) {
-        SqliteStateStore store = SqliteStateStore.open(config);
+        SqliteStateStore store = SqliteStateStore.open(
+                config.databasePath(), config.databaseBusyTimeout());
         WorkspaceRegistry workspaces = new WorkspaceRegistry(store,
                 new WorkspaceResolver(config.dataDirectory()));
         SessionRegistry sessions = new SessionRegistry(store, workspaces);
-        AgentRunner runner = new AgentRunner(model, new ToolRegistry(List.of()),
+        AgentRunner runner = new AgentRunner(model,
+                new ToolDispatcher(new ToolRegistry(List.of()),
+                        new SecretRedactor(config.apiKey())::redact, new ToolOutputTruncator()),
                 new ObjectMapper(), config.model(), config.maxResponseCharacters(), store,
                 new ContextManager(new TokenEstimator()), new TurnDigestFactory());
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,

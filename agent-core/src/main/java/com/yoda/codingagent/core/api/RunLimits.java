@@ -15,11 +15,25 @@ public record RunLimits(
 ) {
 
     public static final int MAX_RECENT_FULL_TURNS = 32;
+    public static final RunLimits DEFAULTS = new RunLimits(
+            20, Duration.ofSeconds(900), Duration.ofSeconds(120),
+            Duration.ofSeconds(30), 20_000, 65_536, 8_192, 4);
 
     public RunLimits {
-        if (maxSteps < 1 || maxToolOutputChars < 1 || maxInputTokens < 1
-                || reservedOutputTokens < 1) {
-            throw new IllegalArgumentException("run limits must be positive");
+        if (maxSteps < 1 || maxSteps > 100) {
+            throw new IllegalArgumentException("maxSteps must be between 1 and 100");
+        }
+        if (maxToolOutputChars < 1_024 || maxToolOutputChars > 200_000) {
+            throw new IllegalArgumentException(
+                    "maxToolOutputChars must be between 1024 and 200000");
+        }
+        if (maxInputTokens < 8_192 || maxInputTokens > 1_000_000) {
+            throw new IllegalArgumentException(
+                    "maxInputTokens must be between 8192 and 1000000");
+        }
+        if (reservedOutputTokens < 512 || reservedOutputTokens > 200_000) {
+            throw new IllegalArgumentException(
+                    "reservedOutputTokens must be between 512 and 200000");
         }
         if (recentFullTurns < 0 || recentFullTurns > MAX_RECENT_FULL_TURNS) {
             throw new IllegalArgumentException(
@@ -32,6 +46,11 @@ public record RunLimits(
         turnTimeout = requirePositive(turnTimeout, "turnTimeout");
         modelTimeout = requirePositive(modelTimeout, "modelTimeout");
         commandTimeout = requirePositive(commandTimeout, "commandTimeout");
+        if (turnTimeout.compareTo(Duration.ofHours(1)) > 0
+                || modelTimeout.compareTo(Duration.ofHours(1)) > 0
+                || commandTimeout.compareTo(Duration.ofMinutes(15)) > 0) {
+            throw new IllegalArgumentException("run timeout exceeds its configured maximum");
+        }
         if (modelTimeout.compareTo(turnTimeout) > 0
                 || commandTimeout.compareTo(turnTimeout) > 0) {
             throw new IllegalArgumentException(

@@ -11,12 +11,10 @@ import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.SessionId;
 import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.api.WorkspaceId;
-import com.yoda.codingagent.core.api.WorkspaceStatus;
 import com.yoda.codingagent.core.error.AgentException;
 import com.yoda.codingagent.core.model.Message;
 import com.yoda.codingagent.core.tool.ToolCall;
 import com.yoda.codingagent.core.tool.ToolDefinition;
-import com.yoda.codingagent.core.workspace.WorkspaceContext;
 import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -44,10 +42,8 @@ class ContextManagerTest {
                         new Message.UserMessage(second, "second user"),
                         new Message.AssistantMessage(second, "second final")));
         List<Message> currentMessages = List.of(new Message.UserMessage(current, "current user"));
-        WorkspaceContext workspace = new WorkspaceContext(workspaceId,
-                Path.of("/tmp/context-workspace"), WorkspaceStatus.ACTIVE);
-
-        ContextSnapshot snapshot = manager.buildSnapshot(history, workspace, currentMessages,
+        ContextSnapshot snapshot = manager.buildSnapshot(history, workspaceId,
+                Path.of("/tmp/context-workspace"), currentMessages,
                 List.of(toolDefinition()), new ContextBudgetPolicy(4096, 512, 1));
 
         assertTrue(snapshot.compacted());
@@ -67,12 +63,11 @@ class ContextManagerTest {
         TurnId current = TurnId.random();
         CanonicalHistory history = new CanonicalHistory(SessionId.random(), workspaceId,
                 List.of(new Message.SystemMessage("system")));
-        WorkspaceContext workspace = new WorkspaceContext(workspaceId,
-                Path.of("/tmp/context-workspace"), WorkspaceStatus.ACTIVE);
         List<Message> largeCurrent = List.of(new Message.UserMessage(current, "x".repeat(1000)));
 
         AgentException limit = assertThrows(AgentException.class,
-                () -> manager.buildSnapshot(history, workspace, largeCurrent,
+                () -> manager.buildSnapshot(history, workspaceId,
+                        Path.of("/tmp/context-workspace"), largeCurrent,
                         List.of(toolDefinition()), new ContextBudgetPolicy(100, 20, 0)));
         assertEquals(ErrorCode.CONTEXT_LIMIT, limit.errorCode());
 
@@ -81,14 +76,16 @@ class ContextManagerTest {
                 new Message.UserMessage(current, "read"),
                 new Message.AssistantToolCallsMessage(current, "", List.of(call)));
         assertThrows(IllegalArgumentException.class,
-                () -> manager.buildSnapshot(history, workspace, incomplete,
+                () -> manager.buildSnapshot(history, workspaceId,
+                        Path.of("/tmp/context-workspace"), incomplete,
                         List.of(toolDefinition()), new ContextBudgetPolicy(4096, 512, 0)));
 
         List<Message> prematureFinalText = List.of(
                 new Message.UserMessage(current, "read"),
                 new Message.AssistantMessage(current, "not committed yet"));
         assertThrows(IllegalArgumentException.class,
-                () -> manager.buildSnapshot(history, workspace, prematureFinalText,
+                () -> manager.buildSnapshot(history, workspaceId,
+                        Path.of("/tmp/context-workspace"), prematureFinalText,
                         List.of(toolDefinition()), new ContextBudgetPolicy(4096, 512, 0)));
     }
 

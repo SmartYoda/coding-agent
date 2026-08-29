@@ -15,8 +15,6 @@ import com.yoda.codingagent.core.api.TurnStatus;
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.api.WorkspaceId;
 import com.yoda.codingagent.core.api.WorkspaceStatus;
-import com.yoda.codingagent.core.agent.AgentTurn;
-import com.yoda.codingagent.core.config.AgentConfig;
 import com.yoda.codingagent.core.context.CanonicalHistory;
 import com.yoda.codingagent.core.context.TurnDigest;
 import com.yoda.codingagent.core.error.AgentException;
@@ -64,11 +62,17 @@ public final class SqliteStateStore implements StateStore {
         this.busyTimeoutMillis = busyTimeoutMillis;
     }
 
-    public static SqliteStateStore open(AgentConfig config) {
-        Objects.requireNonNull(config, "config");
-        Path databasePath = config.databasePath();
+    public static SqliteStateStore open(Path requestedDatabasePath, Duration busyTimeout) {
+        Path databasePath = Objects.requireNonNull(requestedDatabasePath, "databasePath")
+                .toAbsolutePath().normalize();
+        Objects.requireNonNull(busyTimeout, "busyTimeout");
+        long busyMillis = busyTimeout.toMillis();
+        if (busyMillis < 1 || busyMillis > 60_000) {
+            throw new IllegalArgumentException("busyTimeout must be between 1 and 60000 ms");
+        }
         try {
-            Files.createDirectories(config.dataDirectory());
+            Files.createDirectories(Objects.requireNonNull(databasePath.getParent(),
+                    "databasePath parent"));
             SQLiteDataSource dataSource = new SQLiteDataSource();
             dataSource.setUrl("jdbc:sqlite:" + databasePath);
             Flyway.configure()
@@ -78,7 +82,7 @@ public final class SqliteStateStore implements StateStore {
                     .load()
                     .migrate();
 
-            int busyTimeoutMillis = Math.toIntExact(config.databaseBusyTimeout().toMillis());
+            int busyTimeoutMillis = Math.toIntExact(busyMillis);
             SqliteStateStore store = new SqliteStateStore(dataSource, databasePath,
                     busyTimeoutMillis);
             store.initializeDatabase();
@@ -396,11 +400,14 @@ public final class SqliteStateStore implements StateStore {
     }
 
     @Override
-    public void beginTurn(AgentTurn turn, String userInput) {
-        Objects.requireNonNull(turn, "turn");
+    public void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt,
+                          String userInput) {
+        Objects.requireNonNull(turnId, "turnId");
+        Objects.requireNonNull(sessionId, "sessionId");
+        Objects.requireNonNull(startedAt, "startedAt");
         String input = requireNonBlank(userInput, "userInput");
         withTransaction(connection -> {
-            SessionStatus sessionStatus = findSessionStatus(connection, turn.sessionId());
+            SessionStatus sessionStatus = findSessionStatus(connection, sessionId);
             if (sessionStatus == null) {
                 throw new AgentException(ErrorCode.UNKNOWN_SESSION,
                         "session does not exist");
@@ -408,55 +415,55 @@ public final class SqliteStateStore implements StateStore {
             if (sessionStatus == SessionStatus.CLOSED) {
                 throw new AgentException(ErrorCode.SESSION_CLOSED, "session is closed");
             }
-            if (hasActiveTurn(connection, turn.sessionId())) {
+            if (hasActiveTurn(connection, sessionId)) {
                 throw new AgentException(ErrorCode.SESSION_BUSY,
                         "session has an active turn");
             }
             int turnNo = nextSequence(connection, "turns", "turn_no",
-                    "session_id", turn.sessionId().value().toString());
+                    "session_id", sessionId.value().toString());
             int messageSequence = nextSequence(connection, "messages", "sequence_no",
-                    "session_id", turn.sessionId().value().toString());
-            long now = turn.startedAt().toEpochMilli();
+                    "session_id", sessionId.value().toString());
+            long now = startedAt.toEpochMilli();
             try (PreparedStatement statement = connection.prepareStatement("""
                     INSERT INTO turns
                         (id, session_id, turn_no, status, termination_reason,
                          created_at, updated_at, finished_at)
                     VALUES (?, ?, ?, 'RUNNING', NULL, ?, ?, NULL)
                     """)) {
-                statement.setString(1, turn.turnId().value().toString());
-                statement.setString(2, turn.sessionId().value().toString());
+                statement.setString(1, turnId.value().toString());
+                statement.setString(2, sessionId.value().toString());
                 statement.setInt(3, turnNo);
                 statement.setLong(4, now);
                 statement.setLong(5, now);
                 requireOneRow(statement.executeUpdate(), "begin turn");
             }
-            insertMessage(connection, turn.sessionId(), turn.turnId(), null, null,
+            insertMessage(connection, sessionId, turnId, null, null,
                     messageSequence, "USER", "USER_TEXT", input, now);
             return null;
         });
     }
 
     @Override
-    public void markTurnStreaming(AgentTurn turn) {
-        Objects.requireNonNull(turn, "turn");
-        transitionTurn(turn.turnId(), "RUNNING", "STREAMING_MODEL");
+    public void markTurnStreaming(TurnId turnId) {
+        transitionTurn(Objects.requireNonNull(turnId, "turnId"),
+                "RUNNING", "STREAMING_MODEL");
     }
 
     @Override
-    public StagedModelStep stageToolStep(AgentTurn turn, ModelResponse response,
+    public StagedModelStep stageToolStep(TurnId turnId, int stepNo, ModelResponse response,
                                          int contextEstimatedTokens) {
-        Objects.requireNonNull(turn, "turn");
+        Objects.requireNonNull(turnId, "turnId");
         Objects.requireNonNull(response, "response");
         if (response.toolCalls().isEmpty()) {
             throw new IllegalArgumentException("tool step requires tool calls");
         }
-        if (contextEstimatedTokens < 0 || turn.stepCount() < 1) {
+        if (contextEstimatedTokens < 0 || stepNo < 1) {
             throw new IllegalArgumentException("invalid model step metadata");
         }
         UUID stepId = UUID.randomUUID();
         long now = Instant.now().toEpochMilli();
         withTransaction(connection -> {
-            insertModelStep(connection, stepId, turn, response, contextEstimatedTokens,
+            insertModelStep(connection, stepId, turnId, stepNo, response, contextEstimatedTokens,
                     ModelStepStatus.STAGED, now);
             int ordinal = 0;
             for (ToolCall call : response.toolCalls()) {
@@ -477,10 +484,10 @@ public final class SqliteStateStore implements StateStore {
                     requireOneRow(statement.executeUpdate(), "stage tool call");
                 }
             }
-            updateTurnStatus(connection, turn.turnId(), "STREAMING_MODEL", "EXECUTING_TOOL");
+            updateTurnStatus(connection, turnId, "STREAMING_MODEL", "EXECUTING_TOOL");
             return null;
         });
-        return new StagedModelStep(stepId, turn.turnId(), turn.stepCount());
+        return new StagedModelStep(stepId, turnId, stepNo);
     }
 
     @Override
@@ -571,29 +578,29 @@ public final class SqliteStateStore implements StateStore {
     }
 
     @Override
-    public void completeTurn(AgentTurn turn, ModelResponse response,
+    public void completeTurn(TurnId turnId, int stepNo, ModelResponse response,
                              int contextEstimatedTokens, TurnDigest digest) {
-        Objects.requireNonNull(turn, "turn");
+        Objects.requireNonNull(turnId, "turnId");
         Objects.requireNonNull(response, "response");
         Objects.requireNonNull(digest, "digest");
         if (!response.toolCalls().isEmpty() || response.visibleText().isBlank()
-                || !digest.turnId().equals(turn.turnId())) {
+                || !digest.turnId().equals(turnId) || stepNo < 1) {
             throw new IllegalArgumentException("invalid final model step");
         }
         UUID stepId = UUID.randomUUID();
         long now = Instant.now().toEpochMilli();
         withTransaction(connection -> {
-            insertModelStep(connection, stepId, turn, response, contextEstimatedTokens,
+            insertModelStep(connection, stepId, turnId, stepNo, response, contextEstimatedTokens,
                     ModelStepStatus.COMMITTED, now);
-            SessionId sessionId = findTurnSession(connection, turn.turnId());
-            int sequence = nextMessageSequenceForTurn(connection, turn.turnId());
-            insertMessage(connection, sessionId, turn.turnId(), stepId, null,
+            SessionId sessionId = findTurnSession(connection, turnId);
+            int sequence = nextMessageSequenceForTurn(connection, turnId);
+            insertMessage(connection, sessionId, turnId, stepId, null,
                     sequence, "ASSISTANT", "ASSISTANT_TEXT", response.visibleText(), now);
             try (PreparedStatement statement = connection.prepareStatement("""
                     INSERT INTO turn_digests (turn_id, digest_json, created_at)
                     VALUES (?, ?, ?)
                     """)) {
-                statement.setString(1, turn.turnId().value().toString());
+                statement.setString(1, turnId.value().toString());
                 statement.setString(2, serializeDigest(digest));
                 statement.setLong(3, now);
                 requireOneRow(statement.executeUpdate(), "insert turn digest");
@@ -606,7 +613,7 @@ public final class SqliteStateStore implements StateStore {
                     """)) {
                 statement.setLong(1, now);
                 statement.setLong(2, now);
-                statement.setString(3, turn.turnId().value().toString());
+                statement.setString(3, turnId.value().toString());
                 requireOneRow(statement.executeUpdate(), "complete turn");
             }
             return null;
@@ -614,8 +621,8 @@ public final class SqliteStateStore implements StateStore {
     }
 
     @Override
-    public void failTurn(AgentTurn turn, TurnStatus status, ErrorCode reason) {
-        Objects.requireNonNull(turn, "turn");
+    public void failTurn(TurnId turnId, TurnStatus status, ErrorCode reason) {
+        Objects.requireNonNull(turnId, "turnId");
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(reason, "reason");
         if (status != TurnStatus.FAILED && status != TurnStatus.CANCELLED
@@ -635,7 +642,7 @@ public final class SqliteStateStore implements StateStore {
                     """)) {
                 statement.setLong(1, now);
                 statement.setLong(2, now);
-                statement.setString(3, turn.turnId().value().toString());
+                statement.setString(3, turnId.value().toString());
                 statement.executeUpdate();
             }
             try (PreparedStatement statement = connection.prepareStatement("""
@@ -654,7 +661,7 @@ public final class SqliteStateStore implements StateStore {
                         "Tool call cancelled because the turn stopped before execution.");
                 statement.setLong(2, now);
                 statement.setLong(3, now);
-                statement.setString(4, turn.turnId().value().toString());
+                statement.setString(4, turnId.value().toString());
                 statement.executeUpdate();
             }
             try (PreparedStatement statement = connection.prepareStatement("""
@@ -662,7 +669,7 @@ public final class SqliteStateStore implements StateStore {
                     WHERE turn_id = ? AND status = 'STAGED'
                     """)) {
                 statement.setLong(1, now);
-                statement.setString(2, turn.turnId().value().toString());
+                statement.setString(2, turnId.value().toString());
                 statement.executeUpdate();
             }
             try (PreparedStatement statement = connection.prepareStatement("""
@@ -675,7 +682,7 @@ public final class SqliteStateStore implements StateStore {
                 statement.setString(2, reason.name());
                 statement.setLong(3, now);
                 statement.setLong(4, now);
-                statement.setString(5, turn.turnId().value().toString());
+                statement.setString(5, turnId.value().toString());
                 requireOneRow(statement.executeUpdate(), "fail turn");
             }
             return null;
@@ -891,7 +898,8 @@ public final class SqliteStateStore implements StateStore {
         }
     }
 
-    private static void insertModelStep(Connection connection, UUID stepId, AgentTurn turn,
+    private static void insertModelStep(Connection connection, UUID stepId, TurnId turnId,
+                                        int stepNo,
                                         ModelResponse response, int contextEstimatedTokens,
                                         ModelStepStatus status, long now) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
@@ -902,8 +910,8 @@ public final class SqliteStateStore implements StateStore {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)) {
             statement.setString(1, stepId.toString());
-            statement.setString(2, turn.turnId().value().toString());
-            statement.setInt(3, turn.stepCount());
+            statement.setString(2, turnId.value().toString());
+            statement.setInt(3, stepNo);
             statement.setString(4, status.name());
             if (response.providerResponseId() == null) {
                 statement.setNull(5, java.sql.Types.VARCHAR);

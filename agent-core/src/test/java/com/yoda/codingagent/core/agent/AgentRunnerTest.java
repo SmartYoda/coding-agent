@@ -1,6 +1,7 @@
 package com.yoda.codingagent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -18,6 +19,7 @@ import com.yoda.codingagent.core.api.TurnStatus;
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.config.AgentConfig;
 import com.yoda.codingagent.core.config.AgentConfigLoader;
+import com.yoda.codingagent.core.config.SecretRedactor;
 import com.yoda.codingagent.core.context.ContextManager;
 import com.yoda.codingagent.core.context.TokenEstimator;
 import com.yoda.codingagent.core.context.TurnDigestFactory;
@@ -30,8 +32,11 @@ import com.yoda.codingagent.core.persistence.StateStore;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateFixture;
 import com.yoda.codingagent.core.tool.Tool;
+import com.yoda.codingagent.core.tool.ToolArguments;
 import com.yoda.codingagent.core.tool.ToolContext;
 import com.yoda.codingagent.core.tool.ToolDefinition;
+import com.yoda.codingagent.core.tool.ToolDispatcher;
+import com.yoda.codingagent.core.tool.ToolOutputTruncator;
 import com.yoda.codingagent.core.tool.ToolRegistry;
 import com.yoda.codingagent.core.tool.ToolResult;
 import com.yoda.codingagent.core.workspace.WorkspaceRegistry;
@@ -110,6 +115,101 @@ class AgentRunnerTest {
     }
 
     @Test
+    void rejectsCallIdReusedByLaterModelStepBeforeSecondExecution(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(
+                List.of(new ModelStreamEvent.ResponseStarted("one"),
+                        new ModelStreamEvent.ToolCallDelta(
+                                0, "same-call", "test_echo", "{\"value\":\"one\"}"),
+                        new ModelStreamEvent.ResponseFinished("tool_calls"),
+                        new ModelStreamEvent.StreamEnded()),
+                List.of(new ModelStreamEvent.ResponseStarted("two"),
+                        new ModelStreamEvent.ToolCallDelta(
+                                0, "same-call", "test_echo", "{\"value\":\"two\"}"),
+                        new ModelStreamEvent.ResponseFinished("tool_calls"),
+                        new ModelStreamEvent.StreamEnded())));
+        AtomicInteger executions = new AtomicInteger();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions,
+                        tempDirectory.resolve("workspace")))));
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), events::add, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.FAILED, result.status());
+        assertEquals(ErrorCode.MODEL_PROTOCOL_ERROR, result.errorCode());
+        assertEquals(1, executions.get());
+        assertEquals(1, events.stream().filter(AgentEvent.ToolStarted.class::isInstance).count());
+    }
+
+    @Test
+    void rejectsDuplicateCallIdInOneModelResponseBeforeAnyExecution(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
+                new ModelStreamEvent.ResponseStarted("one"),
+                new ModelStreamEvent.ToolCallDelta(
+                        0, "same-call", "test_echo", "{\"value\":\"one\"}"),
+                new ModelStreamEvent.ToolCallDelta(
+                        1, "same-call", "test_echo", "{\"value\":\"two\"}"),
+                new ModelStreamEvent.ResponseFinished("tool_calls"),
+                new ModelStreamEvent.StreamEnded())));
+        AtomicInteger executions = new AtomicInteger();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions,
+                        tempDirectory.resolve("workspace")))));
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), events::add, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.FAILED, result.status());
+        assertEquals(ErrorCode.MODEL_PROTOCOL_ERROR, result.errorCode());
+        assertEquals(0, executions.get());
+        assertEquals(0, events.stream().filter(AgentEvent.ToolStarted.class::isInstance).count());
+        assertTrue(application.store().loadCanonicalHistory(application.session().sessionId())
+                .completedTurns().isEmpty());
+    }
+
+    @Test
+    void feedsUnknownAndInvalidToolFailuresBackUntilTheModelCompletes(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(
+                List.of(new ModelStreamEvent.ResponseStarted("one"),
+                        new ModelStreamEvent.ToolCallDelta(
+                                0, "unknown", "missing_tool", "{}"),
+                        new ModelStreamEvent.ResponseFinished("tool_calls"),
+                        new ModelStreamEvent.StreamEnded()),
+                List.of(new ModelStreamEvent.ResponseStarted("two"),
+                        new ModelStreamEvent.ToolCallDelta(
+                                0, "invalid", "test_echo", "{\"extra\":true}"),
+                        new ModelStreamEvent.ResponseFinished("tool_calls"),
+                        new ModelStreamEvent.StreamEnded()),
+                List.of(new ModelStreamEvent.ResponseStarted("three"),
+                        new ModelStreamEvent.TextDelta("recovered"),
+                        new ModelStreamEvent.ResponseFinished("stop"),
+                        new ModelStreamEvent.StreamEnded())));
+        AtomicInteger executions = new AtomicInteger();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions,
+                        tempDirectory.resolve("workspace")))));
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), ignored -> { }, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertEquals("recovered", result.finalText());
+        assertEquals(0, executions.get());
+        assertEquals(3, model.requests.size());
+        Message.ToolResultMessage unknown = (Message.ToolResultMessage)
+                model.requests.get(1).messages().getLast();
+        Message.ToolResultMessage invalid = (Message.ToolResultMessage)
+                model.requests.get(2).messages().getLast();
+        assertEquals(ErrorCode.UNKNOWN_TOOL, unknown.result().errorCode());
+        assertEquals(ErrorCode.INVALID_TOOL_ARGUMENTS, invalid.result().errorCode());
+    }
+
+    @Test
     void boundsToolOutputBeforeModelFeedbackAndPersistence(@TempDir Path tempDirectory)
             throws Exception {
         ScriptedModelClient model = new ScriptedModelClient(List.of(
@@ -130,8 +230,10 @@ class AgentRunnerTest {
             }
 
             @Override
-            public ToolResult execute(ToolContext context, ObjectNode arguments) {
-                return ToolResult.success("x".repeat(20_000));
+            public ToolResult execute(ToolContext context, ToolArguments arguments) {
+                arguments.allowOnly();
+                return ToolResult.success("test-key" + "x".repeat(20_000), false,
+                        Map.of("secretValue", "prefix-test-key-suffix"));
             }
         };
         RunLimits boundedLimits = new RunLimits(4, Duration.ofMinutes(2),
@@ -149,11 +251,20 @@ class AgentRunnerTest {
                 .findFirst().orElseThrow();
         assertEquals(1_024, feedback.content().length());
         assertTrue(feedback.result().truncated());
+        assertFalse(feedback.content().contains("test-key"));
+        assertFalse(feedback.result().metadata().get("secretValue").contains("test-key"));
         Message.ToolResultMessage persisted = (Message.ToolResultMessage) application.store()
                 .loadCanonicalHistory(application.session().sessionId()).messages().stream()
                 .filter(Message.ToolResultMessage.class::isInstance)
                 .findFirst().orElseThrow();
         assertEquals(feedback.result(), persisted.result());
+        try (var stateFiles = Files.list(application.config().dataDirectory())) {
+            for (Path stateFile : stateFiles.filter(Files::isRegularFile).toList()) {
+                String persistedBytes = new String(Files.readAllBytes(stateFile),
+                        java.nio.charset.StandardCharsets.ISO_8859_1);
+                assertFalse(persistedBytes.contains("test-key"), stateFile.toString());
+            }
+        }
     }
 
     @Test
@@ -248,7 +359,8 @@ class AgentRunnerTest {
         assertEquals("STREAMING_MODEL", new SqliteStateFixture(application.config().databasePath())
                 .readTurnStatus(result.turnId()));
 
-        SqliteStateStore.open(application.config());
+        SqliteStateStore.open(application.config().databasePath(),
+                application.config().databaseBusyTimeout());
 
         assertEquals("INTERRUPTED", new SqliteStateFixture(application.config().databasePath())
                 .readTurnStatus(result.turnId()));
@@ -274,7 +386,8 @@ class AgentRunnerTest {
         AgentConfig config = new AgentConfigLoader().load(Map.of(
                 "apiKey", "test-key",
                 "dataDirectory", tempDirectory.resolve("state").toString()), Map.of());
-        SqliteStateStore store = SqliteStateStore.open(config);
+        SqliteStateStore store = SqliteStateStore.open(
+                config.databasePath(), config.databaseBusyTimeout());
         StateStore effectiveStore = failurePoint == null
                 ? store : new FailingStateStore(store, failurePoint);
         Path root = tempDirectory.resolve("workspace");
@@ -283,7 +396,9 @@ class AgentRunnerTest {
                 new WorkspaceResolver(config.dataDirectory()));
         WorkspaceDescriptor workspace = workspaces.register("Workspace", root);
         SessionRegistry sessions = new SessionRegistry(effectiveStore, workspaces);
-        AgentRunner runner = new AgentRunner(model, tools, objectMapper, config.model(),
+        AgentRunner runner = new AgentRunner(model,
+                new ToolDispatcher(tools, new SecretRedactor(config.apiKey())::redact,
+                        new ToolOutputTruncator()), objectMapper, config.model(),
                 config.maxResponseCharacters(), effectiveStore,
                 new ContextManager(new TokenEstimator()), new TurnDigestFactory());
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
@@ -305,14 +420,16 @@ class AgentRunnerTest {
             }
 
             @Override
-            public ToolResult execute(ToolContext context, ObjectNode arguments) {
-                executions.incrementAndGet();
+            public ToolResult execute(ToolContext context, ToolArguments arguments) {
+                String value = arguments.allowOnly("value")
+                        .requireString("value", 1, 1_000);
                 try {
                     assertEquals(expectedRoot.toRealPath(), context.workspaceRoot());
                 } catch (Exception exception) {
                     throw new AssertionError("workspace root must remain resolvable", exception);
                 }
-                return ToolResult.success(arguments.path("value").asText());
+                executions.incrementAndGet();
+                return ToolResult.success(value);
             }
         };
     }

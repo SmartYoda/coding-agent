@@ -5,6 +5,7 @@ import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
 import com.yoda.codingagent.core.api.SessionId;
 import com.yoda.codingagent.core.api.TurnStatus;
+import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.api.WorkspaceId;
 import com.yoda.codingagent.core.context.CanonicalHistory;
@@ -15,6 +16,7 @@ import com.yoda.codingagent.core.persistence.StateStore;
 import com.yoda.codingagent.core.tool.ToolCall;
 import com.yoda.codingagent.core.tool.ToolResult;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 
 final class FailingStateStore implements StateStore {
@@ -72,19 +74,20 @@ final class FailingStateStore implements StateStore {
     }
 
     @Override
-    public void beginTurn(AgentTurn turn, String userInput) {
+    public void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt,
+                          String userInput) {
         failAt(FailurePoint.BEGIN_TURN);
-        delegate.beginTurn(turn, userInput);
+        delegate.beginTurn(turnId, sessionId, startedAt, userInput);
     }
 
     @Override
-    public void markTurnStreaming(AgentTurn turn) { delegate.markTurnStreaming(turn); }
+    public void markTurnStreaming(TurnId turnId) { delegate.markTurnStreaming(turnId); }
 
     @Override
-    public StagedModelStep stageToolStep(AgentTurn turn, ModelResponse response,
+    public StagedModelStep stageToolStep(TurnId turnId, int stepNo, ModelResponse response,
                                          int contextEstimatedTokens) {
         failAt(FailurePoint.STAGE_TOOL_STEP);
-        return delegate.stageToolStep(turn, response, contextEstimatedTokens);
+        return delegate.stageToolStep(turnId, stepNo, response, contextEstimatedTokens);
     }
 
     @Override
@@ -102,15 +105,15 @@ final class FailingStateStore implements StateStore {
     public void commitToolStep(StagedModelStep step) { delegate.commitToolStep(step); }
 
     @Override
-    public void completeTurn(AgentTurn turn, ModelResponse response,
+    public void completeTurn(TurnId turnId, int stepNo, ModelResponse response,
                              int contextEstimatedTokens, TurnDigest digest) {
-        delegate.completeTurn(turn, response, contextEstimatedTokens, digest);
+        delegate.completeTurn(turnId, stepNo, response, contextEstimatedTokens, digest);
     }
 
     @Override
-    public void failTurn(AgentTurn turn, TurnStatus status, ErrorCode reason) {
+    public void failTurn(TurnId turnId, TurnStatus status, ErrorCode reason) {
         failAt(FailurePoint.FAIL_TURN);
-        delegate.failTurn(turn, status, reason);
+        delegate.failTurn(turnId, status, reason);
     }
 
     @Override

@@ -17,6 +17,17 @@ public record ToolResult(ToolStatus status, String output, ErrorCode errorCode,
             throw new IllegalArgumentException("duration must not be negative");
         }
         metadata = Map.copyOf(Objects.requireNonNull(metadata, "metadata"));
+        if (metadata.size() > 8) {
+            throw new IllegalArgumentException("tool metadata contains too many entries");
+        }
+        metadata.forEach((key, value) -> {
+            if (key == null || !key.matches("[A-Za-z][A-Za-z0-9_.-]{0,63}")) {
+                throw new IllegalArgumentException("invalid tool metadata key");
+            }
+            if (value == null || value.length() > 1_024) {
+                throw new IllegalArgumentException("invalid tool metadata value");
+            }
+        });
         if (status == ToolStatus.SUCCESS && errorCode != null) {
             throw new IllegalArgumentException("successful tool result cannot have an error code");
         }
@@ -30,6 +41,12 @@ public record ToolResult(ToolStatus status, String output, ErrorCode errorCode,
                 false, Duration.ZERO, Map.of());
     }
 
+    public static ToolResult success(String output, boolean truncated,
+                                     Map<String, String> metadata) {
+        return new ToolResult(ToolStatus.SUCCESS, output, null,
+                truncated, Duration.ZERO, metadata);
+    }
+
     public static ToolResult failure(ErrorCode errorCode, String safeOutput) {
         return new ToolResult(ToolStatus.FAILURE, safeOutput,
                 Objects.requireNonNull(errorCode, "errorCode"),
@@ -38,6 +55,11 @@ public record ToolResult(ToolStatus status, String output, ErrorCode errorCode,
 
     public boolean success() {
         return status == ToolStatus.SUCCESS;
+    }
+
+    public ToolResult withOutput(String boundedOutput, boolean outputTruncated) {
+        return new ToolResult(status, boundedOutput, errorCode,
+                truncated || outputTruncated, duration, metadata);
     }
 
     public ToolResult withDuration(Duration measuredDuration) {

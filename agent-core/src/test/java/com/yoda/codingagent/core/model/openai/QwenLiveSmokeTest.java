@@ -21,6 +21,7 @@ import com.yoda.codingagent.core.agent.DefaultAgentService;
 import com.yoda.codingagent.core.agent.SessionRegistry;
 import com.yoda.codingagent.core.config.AgentConfig;
 import com.yoda.codingagent.core.config.AgentConfigLoader;
+import com.yoda.codingagent.core.config.SecretRedactor;
 import com.yoda.codingagent.core.context.ContextManager;
 import com.yoda.codingagent.core.context.TokenEstimator;
 import com.yoda.codingagent.core.context.TurnDigestFactory;
@@ -31,8 +32,11 @@ import com.yoda.codingagent.core.model.ModelResponseAccumulator;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
 import com.yoda.codingagent.core.tool.ToolDefinition;
 import com.yoda.codingagent.core.tool.Tool;
+import com.yoda.codingagent.core.tool.ToolArguments;
 import com.yoda.codingagent.core.tool.ToolContext;
 import com.yoda.codingagent.core.tool.ToolRegistry;
+import com.yoda.codingagent.core.tool.ToolDispatcher;
+import com.yoda.codingagent.core.tool.ToolOutputTruncator;
 import com.yoda.codingagent.core.tool.ToolResult;
 import com.yoda.codingagent.core.workspace.WorkspaceRegistry;
 import com.yoda.codingagent.core.workspace.WorkspaceResolver;
@@ -109,14 +113,16 @@ class QwenLiveSmokeTest {
             }
 
             @Override
-            public ToolResult execute(ToolContext context, ObjectNode arguments) {
+            public ToolResult execute(ToolContext context, ToolArguments arguments) {
                 executions.incrementAndGet();
-                assertEquals("pom.xml", arguments.path("path").asText());
+                assertEquals("pom.xml", arguments.allowOnly("path")
+                        .requireString("path", 1, 1_024));
                 return ToolResult.success(
                         "<project><artifactId>coding-agent-parent</artifactId></project>");
             }
         };
-        SqliteStateStore store = SqliteStateStore.open(config);
+        SqliteStateStore store = SqliteStateStore.open(
+                config.databasePath(), config.databaseBusyTimeout());
         Path root = Files.createDirectory(tempDirectory.resolve("workspace"));
         WorkspaceRegistry workspaces = new WorkspaceRegistry(store,
                 new WorkspaceResolver(config.dataDirectory()));
@@ -124,7 +130,9 @@ class QwenLiveSmokeTest {
         SessionRegistry sessions = new SessionRegistry(store, workspaces);
         AgentRunner runner = new AgentRunner(
                 new OpenAiCompatibleChatModelClient(config),
-                new ToolRegistry(List.of(readFile)), objectMapper, config.model(),
+                new ToolDispatcher(new ToolRegistry(List.of(readFile)),
+                        new SecretRedactor(config.apiKey())::redact, new ToolOutputTruncator()),
+                objectMapper, config.model(),
                 config.maxResponseCharacters(), store,
                 new ContextManager(new TokenEstimator()), new TurnDigestFactory());
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,

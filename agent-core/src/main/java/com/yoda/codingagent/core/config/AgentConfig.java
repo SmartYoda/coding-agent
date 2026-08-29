@@ -1,5 +1,6 @@
 package com.yoda.codingagent.core.config;
 
+import com.yoda.codingagent.core.api.RunLimits;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -16,22 +17,43 @@ public final class AgentConfig {
     private final boolean thinkingEnabled;
     private final Path dataDirectory;
     private final Duration databaseBusyTimeout;
+    private final RunLimits defaultRunLimits;
 
     public AgentConfig(URI baseUrl, String apiKey, String model, Duration modelTimeout,
                        int maxSseEventBytes, int maxResponseCharacters,
                        boolean thinkingEnabled, Path dataDirectory,
                        Duration databaseBusyTimeout) {
+        this(baseUrl, apiKey, model, modelTimeout, maxSseEventBytes,
+                maxResponseCharacters, thinkingEnabled, dataDirectory,
+                databaseBusyTimeout, new RunLimits(20, Duration.ofSeconds(900),
+                        modelTimeout, Duration.ofSeconds(30), 20_000,
+                        65_536, 8_192, 4));
+    }
+
+    public AgentConfig(URI baseUrl, String apiKey, String model, Duration modelTimeout,
+                       int maxSseEventBytes, int maxResponseCharacters,
+                       boolean thinkingEnabled, Path dataDirectory,
+                       Duration databaseBusyTimeout, RunLimits defaultRunLimits) {
         this.baseUrl = requireSupportedBaseUrl(baseUrl);
         this.apiKey = requireText(apiKey, "apiKey");
         this.model = requireText(model, "model");
+        if (this.model.length() > 200) {
+            throw new IllegalArgumentException("model must not exceed 200 characters");
+        }
         this.modelTimeout = requirePositive(modelTimeout, "modelTimeout");
-        this.maxSseEventBytes = requirePositive(maxSseEventBytes, "maxSseEventBytes");
-        this.maxResponseCharacters =
-                requirePositive(maxResponseCharacters, "maxResponseCharacters");
+        this.maxSseEventBytes = requireRange(maxSseEventBytes,
+                "maxSseEventBytes", 1_024, 4_194_304);
+        this.maxResponseCharacters = requireRange(maxResponseCharacters,
+                "maxResponseCharacters", 1_024, 16_777_216);
         this.thinkingEnabled = thinkingEnabled;
         this.dataDirectory = requireAbsolutePath(dataDirectory, "dataDirectory");
         this.databaseBusyTimeout = requireRange(databaseBusyTimeout,
                 "databaseBusyTimeout", Duration.ofMillis(1), Duration.ofSeconds(60));
+        this.defaultRunLimits = Objects.requireNonNull(defaultRunLimits, "defaultRunLimits");
+        if (!this.defaultRunLimits.modelTimeout().equals(this.modelTimeout)) {
+            throw new IllegalArgumentException(
+                    "modelTimeout and defaultRunLimits.modelTimeout must match");
+        }
     }
 
     public URI baseUrl() { return baseUrl; }
@@ -54,6 +76,8 @@ public final class AgentConfig {
 
     public Duration databaseBusyTimeout() { return databaseBusyTimeout; }
 
+    public RunLimits defaultRunLimits() { return defaultRunLimits; }
+
     @Override
     public String toString() {
         return "AgentConfig[baseUrl=" + baseUrl + ", apiKey=<redacted>, model=" + model
@@ -69,6 +93,9 @@ public final class AgentConfig {
         Objects.requireNonNull(value, "baseUrl");
         String scheme = value.getScheme();
         String host = value.getHost();
+        if (host == null || host.isBlank() || value.getUserInfo() != null) {
+            throw new IllegalArgumentException("baseUrl must contain a host and no user info");
+        }
         boolean loopbackHttp = "http".equalsIgnoreCase(scheme)
                 && ("localhost".equalsIgnoreCase(host)
                 || "127.0.0.1".equals(host) || "::1".equals(host));
@@ -115,9 +142,10 @@ public final class AgentConfig {
         return normalized;
     }
 
-    private static int requirePositive(int value, String name) {
-        if (value < 1) {
-            throw new IllegalArgumentException(name + " must be positive");
+    private static int requireRange(int value, String name, int minimum, int maximum) {
+        if (value < minimum || value > maximum) {
+            throw new IllegalArgumentException(name + " must be between "
+                    + minimum + " and " + maximum);
         }
         return value;
     }

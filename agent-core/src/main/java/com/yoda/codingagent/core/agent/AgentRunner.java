@@ -25,12 +25,10 @@ import com.yoda.codingagent.core.model.ModelResponse;
 import com.yoda.codingagent.core.model.ModelResponseAccumulator;
 import com.yoda.codingagent.core.model.ModelStreamEvent;
 import com.yoda.codingagent.core.persistence.StateStore;
-import com.yoda.codingagent.core.tool.Tool;
 import com.yoda.codingagent.core.tool.ToolCall;
 import com.yoda.codingagent.core.tool.ToolContext;
-import com.yoda.codingagent.core.tool.ToolRegistry;
+import com.yoda.codingagent.core.tool.ToolDispatcher;
 import com.yoda.codingagent.core.tool.ToolResult;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -39,7 +37,7 @@ import java.util.Objects;
 public final class AgentRunner {
 
     private final ModelClient modelClient;
-    private final ToolRegistry toolRegistry;
+    private final ToolDispatcher toolDispatcher;
     private final ObjectMapper objectMapper;
     private final String model;
     private final int maxResponseCharacters;
@@ -47,11 +45,12 @@ public final class AgentRunner {
     private final ContextManager contextManager;
     private final TurnDigestFactory digestFactory;
 
-    public AgentRunner(ModelClient modelClient, ToolRegistry toolRegistry, ObjectMapper objectMapper,
+    public AgentRunner(ModelClient modelClient, ToolDispatcher toolDispatcher,
+                       ObjectMapper objectMapper,
                        String model, int maxResponseCharacters, StateStore stateStore,
                        ContextManager contextManager, TurnDigestFactory digestFactory) {
         this.modelClient = Objects.requireNonNull(modelClient, "modelClient");
-        this.toolRegistry = Objects.requireNonNull(toolRegistry, "toolRegistry");
+        this.toolDispatcher = Objects.requireNonNull(toolDispatcher, "toolDispatcher");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
         this.model = requireText(model, "model");
         if (maxResponseCharacters < 1) {
@@ -74,7 +73,7 @@ public final class AgentRunner {
                 Objects.requireNonNull(eventSink, "eventSink"));
         boolean began = false;
         try {
-            stateStore.beginTurn(turn, request.input());
+            stateStore.beginTurn(turn.turnId(), turn.sessionId(), turn.startedAt(), request.input());
             began = true;
             events.turnStarted();
             CanonicalHistory history = stateStore.loadCanonicalHistory(session.sessionId());
@@ -85,14 +84,15 @@ public final class AgentRunner {
                 checkStopped(turn, session, cancellationToken);
                 turn.beginNextStep();
                 ContextSnapshot snapshot = contextManager.buildSnapshot(history,
-                        session.workspace(), currentTurn, toolRegistry.definitions(),
+                        session.workspace().workspaceId(), session.workspace().root(),
+                        currentTurn, toolDispatcher.definitions(),
                         ContextBudgetPolicy.from(session.limits()));
-                stateStore.markTurnStreaming(turn);
+                stateStore.markTurnStreaming(turn.turnId());
                 events.modelRequestStarted(turn.stepCount());
                 ModelResponseAccumulator accumulator =
                         new ModelResponseAccumulator(objectMapper, maxResponseCharacters);
                 modelClient.stream(new ModelRequest(model, snapshot.messages(),
-                                toolRegistry.definitions(), session.limits().modelTimeout(),
+                                toolDispatcher.definitions(), session.limits().modelTimeout(),
                                 session.limits().reservedOutputTokens()),
                         event -> consumeEvent(event, accumulator, events), cancellationToken);
                 ModelResponse response = accumulator.response();
@@ -108,17 +108,22 @@ public final class AgentRunner {
                             turn.turnId(), response.visibleText()));
                     TurnDigest digest = digestFactory.create(
                             new CanonicalHistory.TurnHistory(turn.turnId(), completedMessages));
-                    stateStore.completeTurn(turn, response,
+                    stateStore.completeTurn(turn.turnId(), turn.stepCount(), response,
                             snapshot.budget().estimatedInputTokens(), digest);
                     events.turnCompleted();
                     return AgentResult.completed(turn.turnId(), response.visibleText());
                 }
 
-                StateStore.StagedModelStep step = stateStore.stageToolStep(turn, response,
+                StateStore.StagedModelStep step = stateStore.stageToolStep(
+                        turn.turnId(), turn.stepCount(), response,
                         snapshot.budget().estimatedInputTokens());
                 List<Message.ToolResultMessage> resultMessages = new ArrayList<>();
                 for (ToolCall call : response.toolCalls()) {
                     checkStopped(turn, session, cancellationToken);
+                    if (!turn.registerToolCallId(call.callId())) {
+                        throw new AgentException(ErrorCode.MODEL_PROTOCOL_ERROR,
+                                "model reused a tool call id in the same turn");
+                    }
                     stateStore.markToolExecuting(step, call);
                     ToolResult result = executeTool(call, session, turn, cancellationToken, events);
                     stateStore.recordToolResult(step, call, result);
@@ -150,44 +155,13 @@ public final class AgentRunner {
     private ToolResult executeTool(ToolCall call, AgentSession session, AgentTurn turn,
                                    CancellationToken cancellationToken, EventEmitter events) {
         events.toolStarted(call.callId(), call.name());
-        Instant startedAt = Instant.now();
-        Tool tool = toolRegistry.find(call.name()).orElse(null);
-        ToolResult result;
-        if (tool == null) {
-            result = ToolResult.failure(ErrorCode.UNKNOWN_TOOL,
-                    "Unknown tool: " + call.name());
-        } else {
-            try {
-                result = Objects.requireNonNull(tool.execute(
-                        new ToolContext(session.workspace().workspaceId(),
-                                session.workspace().root(), turn.turnId(), cancellationToken),
-                        call.arguments()), "tool result");
-            } catch (RuntimeException exception) {
-                result = ToolResult.failure(ErrorCode.INTERNAL_ERROR,
-                        "Tool execution failed");
-            }
-        }
-        Duration duration = Duration.between(startedAt, Instant.now());
-        if (duration.isNegative()) {
-            duration = Duration.ZERO;
-        }
-        duration = Duration.ofMillis(duration.toMillis());
-        result = result.withDuration(duration);
-        result = boundToolResult(result, session.limits().maxToolOutputChars());
+        ToolResult result = toolDispatcher.dispatch(call,
+                new ToolContext(session.workspace().workspaceId(),
+                        session.workspace().root(), turn.turnId(), call.callId(),
+                        turn.startedAt().plus(session.limits().turnTimeout()),
+                        session.limits(), cancellationToken));
         events.toolCompleted(call.callId(), call.name(), result.success());
         return result;
-    }
-
-    private static ToolResult boundToolResult(ToolResult result, int maximumCharacters) {
-        if (result.output().length() <= maximumCharacters) {
-            return result;
-        }
-        String marker = "\n…[tool output truncated]";
-        int contentLimit = Math.max(0, maximumCharacters - marker.length());
-        String output = result.output().substring(0, contentLimit)
-                + marker.substring(0, Math.min(marker.length(), maximumCharacters - contentLimit));
-        return new ToolResult(result.status(), output, result.errorCode(), true,
-                result.duration(), result.metadata());
     }
 
     private Failure persistFailure(AgentTurn turn, boolean began, TurnStatus status,
@@ -196,7 +170,7 @@ public final class AgentRunner {
             return new Failure(status, errorCode, safeMessage);
         }
         try {
-            stateStore.failTurn(turn, status, errorCode);
+            stateStore.failTurn(turn.turnId(), status, errorCode);
             return new Failure(status, errorCode, safeMessage);
         } catch (RuntimeException persistenceFailure) {
             return new Failure(TurnStatus.FAILED, ErrorCode.STORAGE_ERROR,
