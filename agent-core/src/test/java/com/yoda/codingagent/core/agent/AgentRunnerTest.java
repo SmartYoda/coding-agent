@@ -23,12 +23,16 @@ import com.yoda.codingagent.core.config.SecretRedactor;
 import com.yoda.codingagent.core.context.ContextManager;
 import com.yoda.codingagent.core.context.TokenEstimator;
 import com.yoda.codingagent.core.context.TurnDigestFactory;
+import com.yoda.codingagent.core.error.AgentException;
 import com.yoda.codingagent.core.model.Message;
 import com.yoda.codingagent.core.model.ModelClient;
 import com.yoda.codingagent.core.model.ModelRequest;
+import com.yoda.codingagent.core.model.ModelRetryPolicy;
 import com.yoda.codingagent.core.model.ModelStreamEvent;
 import com.yoda.codingagent.core.model.ModelStreamSink;
+import com.yoda.codingagent.core.model.RetryWaiter;
 import com.yoda.codingagent.core.persistence.StateStore;
+import com.yoda.codingagent.core.persistence.sqlite.DataDirectoryLock;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateFixture;
 import com.yoda.codingagent.core.tool.Tool;
@@ -44,6 +48,10 @@ import com.yoda.codingagent.core.workspace.WorkspaceResolver;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -290,6 +298,28 @@ class AgentRunnerTest {
     }
 
     @Test
+    void markStreamingFailureDoesNotConsumeAStepOrCallTheModel(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = finalTextModel("unused");
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of()),
+                FailingStateStore.FailurePoint.MARK_TURN_STREAMING);
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), events::add, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.FAILED, result.status());
+        assertEquals(ErrorCode.STORAGE_ERROR, result.errorCode());
+        assertEquals(0, result.stepCount());
+        assertEquals(0, result.toolCallCount());
+        assertEquals(0, model.requests.size());
+        assertEquals("FAILED", new SqliteStateFixture(application.config().databasePath())
+                .readTurnStatus(result.turnId()));
+        assertSingleTerminalEvent(events);
+    }
+
+    @Test
     void stagedWriteFailureExecutesNoToolAndStartsNoSecondModelRequest(
             @TempDir Path tempDirectory) throws Exception {
         ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
@@ -342,6 +372,112 @@ class AgentRunnerTest {
     }
 
     @Test
+    void markToolExecutingFailureCancelsPendingCallWithoutExecutingIt(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = oneToolModel();
+        AtomicInteger executions = new AtomicInteger();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions,
+                        tempDirectory.resolve("workspace")))),
+                FailingStateStore.FailurePoint.MARK_TOOL_EXECUTING);
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), events::add, CancellationToken.NONE);
+
+        assertEquals(ErrorCode.STORAGE_ERROR, result.errorCode());
+        assertEquals(1, result.stepCount());
+        assertEquals(0, result.toolCallCount());
+        assertEquals(0, executions.get());
+        assertEquals(1, model.requests.size());
+        var state = new SqliteStateFixture(application.config().databasePath())
+                .readRecoveryState(result.turnId());
+        assertEquals("FAILED", state.turnStatus());
+        assertEquals("ABORTED", state.stepStatus());
+        assertEquals(List.of("CANCELLED"), state.toolStatuses());
+        assertSingleTerminalEvent(events);
+    }
+
+    @Test
+    void cancellationObservedAfterMarkExecutingPreventsToolSideEffect(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = oneToolModel();
+        AtomicInteger executions = new AtomicInteger();
+        AtomicInteger cancellationChecks = new AtomicInteger();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions,
+                        tempDirectory.resolve("workspace")))));
+        List<AgentEvent> events = new ArrayList<>();
+        CancellationToken token = () -> cancellationChecks.incrementAndGet() >= 6;
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), events::add, token);
+
+        assertEquals(TurnStatus.CANCELLED, result.status());
+        assertEquals(ErrorCode.CANCELLED, result.errorCode());
+        assertEquals(0, result.toolCallCount());
+        assertEquals(0, executions.get());
+        var state = new SqliteStateFixture(application.config().databasePath())
+                .readRecoveryState(result.turnId());
+        assertEquals("CANCELLED", state.turnStatus());
+        assertEquals("ABORTED", state.stepStatus());
+        assertEquals(List.of("UNKNOWN"), state.toolStatuses());
+        assertSingleTerminalEvent(events);
+    }
+
+    @Test
+    void commitToolStepFailurePreservesAuditButStartsNoSecondModelRequest(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = oneToolModel();
+        AtomicInteger executions = new AtomicInteger();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions,
+                        tempDirectory.resolve("workspace")))),
+                FailingStateStore.FailurePoint.COMMIT_TOOL_STEP);
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), events::add, CancellationToken.NONE);
+
+        assertEquals(ErrorCode.STORAGE_ERROR, result.errorCode());
+        assertEquals(1, result.stepCount());
+        assertEquals(1, result.toolCallCount());
+        assertEquals(1, executions.get());
+        assertEquals(1, model.requests.size());
+        var state = new SqliteStateFixture(application.config().databasePath())
+                .readRecoveryState(result.turnId());
+        assertEquals("FAILED", state.turnStatus());
+        assertEquals("ABORTED", state.stepStatus());
+        assertEquals(List.of("SUCCESS"), state.toolStatuses());
+        assertSingleTerminalEvent(events);
+    }
+
+    @Test
+    void completeTurnFailurePublishesOnlyFailureAndCommitsNoHistory(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = finalTextModel("done");
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of()), FailingStateStore.FailurePoint.COMPLETE_TURN);
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), events::add, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.FAILED, result.status());
+        assertEquals(ErrorCode.STORAGE_ERROR, result.errorCode());
+        assertEquals(1, result.stepCount());
+        assertEquals(0, result.toolCallCount());
+        assertEquals(1, model.requests.size());
+        assertTrue(application.store().loadCanonicalHistory(application.session().sessionId())
+                .completedTurns().isEmpty());
+        assertEquals(0, events.stream()
+                .filter(AgentEvent.TurnCompleted.class::isInstance).count());
+        assertEquals(0, events.stream()
+                .filter(AgentEvent.TurnDigestCreated.class::isInstance).count());
+        assertSingleTerminalEvent(events);
+    }
+
+    @Test
     void startupRecoversTurnWhenWritingItsFailureStateAlsoFailed(
             @TempDir Path tempDirectory) throws Exception {
         ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
@@ -359,11 +495,297 @@ class AgentRunnerTest {
         assertEquals("STREAMING_MODEL", new SqliteStateFixture(application.config().databasePath())
                 .readTurnStatus(result.turnId()));
 
-        SqliteStateStore.open(application.config().databasePath(),
+        application.dataDirectoryLock().close();
+        DataDirectoryLock restartLock = DataDirectoryLock.acquire(
+                application.config().dataDirectory());
+        SqliteStateStore.open(restartLock, application.config().databasePath(),
                 application.config().databaseBusyTimeout());
 
         assertEquals("INTERRUPTED", new SqliteStateFixture(application.config().databasePath())
                 .readTurnStatus(result.turnId()));
+    }
+
+    @Test
+    void retriesTransientModelFailureTwiceWithinOneLogicalStep(
+            @TempDir Path tempDirectory) throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        ModelClient model = (request, sink, token) -> {
+            int attempt = attempts.incrementAndGet();
+            if (attempt < 3) {
+                throw new AgentException(ErrorCode.MODEL_UNAVAILABLE,
+                        "temporary model failure");
+            }
+            sink.onEvent(new ModelStreamEvent.ResponseStarted("success"));
+            sink.onEvent(new ModelStreamEvent.TextDelta("done"));
+            sink.onEvent(new ModelStreamEvent.ResponseFinished("stop"));
+            sink.onEvent(new ModelStreamEvent.StreamEnded());
+        };
+        List<Duration> waits = new ArrayList<>();
+        RetryWaiter waiter = (delay, token) -> waits.add(delay);
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of()), null, limits(), waiter);
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), events::add, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertEquals(1, result.stepCount());
+        assertEquals(3, attempts.get());
+        assertEquals(List.of(Duration.ofSeconds(1), Duration.ofSeconds(2)), waits);
+        assertEquals(1, events.stream()
+                .filter(AgentEvent.ModelRequestStarted.class::isInstance).count());
+        assertEquals(2, events.stream()
+                .filter(AgentEvent.RetryScheduled.class::isInstance).count());
+        assertEquals(1, events.stream()
+                .filter(AgentEvent.ModelRequestCompleted.class::isInstance).count());
+    }
+
+    @Test
+    void retryAttemptsShareOneLogicalModelDeadline(@TempDir Path tempDirectory)
+            throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        ModelClient unavailable = (request, sink, token) -> {
+            attempts.incrementAndGet();
+            throw new AgentException(ErrorCode.MODEL_UNAVAILABLE, "temporary failure");
+        };
+        MutableClock clock = new MutableClock(Instant.parse("2026-08-30T00:00:00Z"));
+        List<Duration> waits = new ArrayList<>();
+        RetryWaiter waiter = (delay, token) -> {
+            waits.add(delay);
+            clock.advance(delay);
+        };
+        RunLimits limits = new RunLimits(4, Duration.ofSeconds(30), Duration.ofSeconds(3),
+                Duration.ofSeconds(3), 16_384, 8_192, 1_024, 2);
+        TestApplication application = application(tempDirectory, unavailable,
+                new ToolRegistry(List.of()), null, limits, waiter, clock);
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), events::add, CancellationToken.NONE);
+
+        assertEquals(ErrorCode.MODEL_TIMEOUT, result.errorCode());
+        assertEquals(2, attempts.get());
+        assertEquals(List.of(Duration.ofSeconds(1)), waits);
+        assertEquals(1, result.stepCount());
+        assertEquals(1, events.stream()
+                .filter(AgentEvent.RetryScheduled.class::isInstance).count());
+    }
+
+    @Test
+    void neverRetriesAfterSemanticDelta(@TempDir Path tempDirectory) throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        ModelClient model = (request, sink, token) -> {
+            attempts.incrementAndGet();
+            sink.onEvent(new ModelStreamEvent.ResponseStarted("partial"));
+            sink.onEvent(new ModelStreamEvent.TextDelta("visible"));
+            throw new AgentException(ErrorCode.MODEL_UNAVAILABLE,
+                    "stream failed after output");
+        };
+        List<Duration> waits = new ArrayList<>();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of()), null, limits(),
+                (delay, token) -> waits.add(delay));
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), ignored -> { }, CancellationToken.NONE);
+
+        assertEquals(ErrorCode.MODEL_UNAVAILABLE, result.errorCode());
+        assertEquals(1, attempts.get());
+        assertTrue(waits.isEmpty());
+    }
+
+    @Test
+    void eventSinkFailureCannotChangeThePersistedTurnResult(@TempDir Path tempDirectory)
+            throws Exception {
+        TestApplication application = application(tempDirectory, finalTextModel("done"),
+                new ToolRegistry(List.of()));
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), event -> {
+                    throw new IllegalStateException("display failed");
+                }, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertEquals("COMPLETED", new SqliteStateFixture(application.config().databasePath())
+                .readTurnStatus(result.turnId()));
+    }
+
+    @Test
+    void cancellationAndContextLimitPublishClassifiedTerminalsAndReleaseLease(
+            @TempDir Path tempDirectory) throws Exception {
+        TestApplication cancelledApplication = application(tempDirectory.resolve("cancelled"),
+                finalTextModel("next succeeds"), new ToolRegistry(List.of()));
+        List<AgentEvent> cancelledEvents = new ArrayList<>();
+        AgentResult cancelled = cancelledApplication.service().runTurn(
+                cancelledApplication.session().sessionId(), new AgentRequest("cancel now"),
+                cancelledEvents::add, () -> true);
+        assertEquals(TurnStatus.CANCELLED, cancelled.status());
+        assertEquals(ErrorCode.CANCELLED, cancelled.errorCode());
+        assertEquals(1, cancelledEvents.stream()
+                .filter(AgentEvent.TurnCancelled.class::isInstance).count());
+        AgentResult afterCancellation = cancelledApplication.service().runTurn(
+                cancelledApplication.session().sessionId(), new AgentRequest("continue"),
+                ignored -> { }, CancellationToken.NONE);
+        assertEquals(TurnStatus.COMPLETED, afterCancellation.status());
+
+        TestApplication limitedApplication = application(tempDirectory.resolve("context"),
+                finalTextModel("next succeeds"), new ToolRegistry(List.of()));
+        List<AgentEvent> limitedEvents = new ArrayList<>();
+        AgentResult limited = limitedApplication.service().runTurn(
+                limitedApplication.session().sessionId(),
+                new AgentRequest("x".repeat(AgentRequest.MAX_INPUT_CHARACTERS)),
+                limitedEvents::add, CancellationToken.NONE);
+        assertEquals(TurnStatus.LIMIT_REACHED, limited.status());
+        assertEquals(ErrorCode.CONTEXT_LIMIT, limited.errorCode());
+        assertEquals(1, limitedEvents.stream()
+                .filter(AgentEvent.TurnLimitReached.class::isInstance).count());
+        AgentResult afterLimit = limitedApplication.service().runTurn(
+                limitedApplication.session().sessionId(), new AgentRequest("continue"),
+                ignored -> { }, CancellationToken.NONE);
+        assertEquals(TurnStatus.COMPLETED, afterLimit.status());
+    }
+
+    @Test
+    void maxStepsAndTurnDeadlineProduceStableLimitResults(@TempDir Path tempDirectory)
+            throws Exception {
+        RunLimits oneStep = new RunLimits(1, Duration.ofMinutes(2), Duration.ofSeconds(30),
+                Duration.ofSeconds(10), 16_384, 8_192, 1_024, 2);
+        AtomicInteger executions = new AtomicInteger();
+        TestApplication stepLimited = application(tempDirectory.resolve("steps"), oneToolModel(),
+                new ToolRegistry(List.of(echoTool(executions,
+                        tempDirectory.resolve("steps/workspace")))), null, oneStep);
+        List<AgentEvent> stepEvents = new ArrayList<>();
+        AgentResult stepResult = stepLimited.service().runTurn(
+                stepLimited.session().sessionId(), new AgentRequest("run"),
+                stepEvents::add, CancellationToken.NONE);
+        assertEquals(TurnStatus.LIMIT_REACHED, stepResult.status());
+        assertEquals(ErrorCode.TURN_LIMIT, stepResult.errorCode());
+        assertEquals(1, stepResult.stepCount());
+        assertEquals(1, stepResult.toolCallCount());
+        assertEquals(1, executions.get());
+        assertSingleTerminalEvent(stepEvents);
+
+        RunLimits shortTurn = new RunLimits(4, Duration.ofSeconds(1),
+                Duration.ofSeconds(1), Duration.ofSeconds(1),
+                16_384, 8_192, 1_024, 2);
+        Clock advancing = new AdvancingClock(
+                Instant.parse("2026-08-30T00:00:00Z"), Duration.ofSeconds(2));
+        TestApplication timedOut = application(tempDirectory.resolve("timeout"),
+                finalTextModel("unused"), new ToolRegistry(List.of()), null, shortTurn,
+                (delay, token) -> { }, advancing);
+        List<AgentEvent> timeoutEvents = new ArrayList<>();
+        AgentResult timeout = timedOut.service().runTurn(timedOut.session().sessionId(),
+                new AgentRequest("run"), timeoutEvents::add, CancellationToken.NONE);
+        assertEquals(TurnStatus.LIMIT_REACHED, timeout.status());
+        assertEquals(ErrorCode.TURN_LIMIT, timeout.errorCode());
+        assertEquals(0, timeout.stepCount());
+        assertSingleTerminalEvent(timeoutEvents);
+    }
+
+    @Test
+    void redactsUserInputAndSecretSplitAcrossTextDeltasBeforeAnyOutputOrPersistence(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
+                new ModelStreamEvent.ResponseStarted("one"),
+                new ModelStreamEvent.TextDelta("prefix-te"),
+                new ModelStreamEvent.TextDelta("st-key-suffix"),
+                new ModelStreamEvent.ResponseFinished("stop"),
+                new ModelStreamEvent.StreamEnded())));
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of()));
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("input-test-key"), events::add, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertEquals("prefix-<redacted>-suffix", result.finalText());
+        assertFalse(model.requests.getFirst().messages().toString().contains("test-key"));
+        String streamed = events.stream().filter(AgentEvent.ModelTextDelta.class::isInstance)
+                .map(AgentEvent.ModelTextDelta.class::cast)
+                .map(AgentEvent.ModelTextDelta::text)
+                .collect(java.util.stream.Collectors.joining());
+        assertEquals(result.finalText(), streamed);
+        try (var stateFiles = Files.list(application.config().dataDirectory())) {
+            for (Path stateFile : stateFiles.filter(Files::isRegularFile).toList()) {
+                String persistedBytes = new String(Files.readAllBytes(stateFile),
+                        java.nio.charset.StandardCharsets.ISO_8859_1);
+                assertFalse(persistedBytes.contains("test-key"), stateFile.toString());
+            }
+        }
+    }
+
+    @Test
+    void rejectsSecretSplitAcrossToolArgumentsBeforeStageOrExecution(
+            @TempDir Path tempDirectory) throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
+                new ModelStreamEvent.ResponseStarted("one"),
+                new ModelStreamEvent.ToolCallDelta(
+                        0, "call-1", "test_echo", "{\"value\":\"te"),
+                new ModelStreamEvent.ToolCallDelta(0, "", "", "st-key\"}"),
+                new ModelStreamEvent.ResponseFinished("tool_calls"),
+                new ModelStreamEvent.StreamEnded())));
+        AtomicInteger executions = new AtomicInteger();
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(executions,
+                        tempDirectory.resolve("workspace")))));
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("run"), events::add, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.FAILED, result.status());
+        assertEquals(ErrorCode.MODEL_PROTOCOL_ERROR, result.errorCode());
+        assertEquals(0, executions.get());
+        assertEquals(0, events.stream()
+                .filter(AgentEvent.ModelRequestCompleted.class::isInstance).count());
+        assertEquals(0, events.stream()
+                .filter(AgentEvent.ToolStarted.class::isInstance).count());
+        assertTrue(application.store().loadCanonicalHistory(application.session().sessionId())
+                .completedTurns().isEmpty());
+        assertFalse(events.toString().contains("test-key"));
+    }
+
+    @Test
+    void rejectsSecretsInProviderIdToolNameAndSplitCallIdWithoutPublicLeak(
+            @TempDir Path tempDirectory) throws Exception {
+        List<List<ModelStreamEvent>> scripts = List.of(
+                List.of(new ModelStreamEvent.ResponseStarted("response-test-key"),
+                        new ModelStreamEvent.TextDelta("done"),
+                        new ModelStreamEvent.ResponseFinished("stop"),
+                        new ModelStreamEvent.StreamEnded()),
+                List.of(new ModelStreamEvent.ResponseStarted("response"),
+                        new ModelStreamEvent.ToolCallDelta(
+                                0, "call-1", "test-key", "{}"),
+                        new ModelStreamEvent.ResponseFinished("tool_calls"),
+                        new ModelStreamEvent.StreamEnded()),
+                List.of(new ModelStreamEvent.ResponseStarted("response"),
+                        new ModelStreamEvent.ToolCallDelta(0, "te", "test_echo", "{"),
+                        new ModelStreamEvent.ToolCallDelta(0, "st-key", "", "}"),
+                        new ModelStreamEvent.ResponseFinished("tool_calls"),
+                        new ModelStreamEvent.StreamEnded()));
+        for (int index = 0; index < scripts.size(); index++) {
+            Path caseDirectory = tempDirectory.resolve("case-" + index);
+            ScriptedModelClient model = new ScriptedModelClient(List.of(scripts.get(index)));
+            AtomicInteger executions = new AtomicInteger();
+            TestApplication application = application(caseDirectory, model,
+                    new ToolRegistry(List.of(echoTool(executions,
+                            caseDirectory.resolve("workspace")))));
+            List<AgentEvent> events = new ArrayList<>();
+
+            AgentResult result = application.service().runTurn(
+                    application.session().sessionId(), new AgentRequest("run"),
+                    events::add, CancellationToken.NONE);
+
+            assertEquals(ErrorCode.MODEL_PROTOCOL_ERROR, result.errorCode());
+            assertEquals(0, executions.get());
+            assertEquals(0, events.stream()
+                    .filter(AgentEvent.ModelRequestCompleted.class::isInstance).count());
+            assertFalse(events.toString().contains("test-key"));
+            assertFalse(result.toString().contains("test-key"));
+            application.dataDirectoryLock().close();
+        }
     }
 
     private TestApplication application(Path tempDirectory, ModelClient model,
@@ -383,10 +805,28 @@ class AgentRunnerTest {
                                         FailingStateStore.FailurePoint failurePoint,
                                         RunLimits runLimits)
             throws Exception {
+        return application(tempDirectory, model, tools, failurePoint, runLimits, null);
+    }
+
+    private TestApplication application(Path tempDirectory, ModelClient model,
+                                        ToolRegistry tools,
+                                        FailingStateStore.FailurePoint failurePoint,
+                                        RunLimits runLimits, RetryWaiter retryWaiter)
+            throws Exception {
+        return application(tempDirectory, model, tools, failurePoint, runLimits, retryWaiter,
+                Clock.systemUTC());
+    }
+
+    private TestApplication application(Path tempDirectory, ModelClient model,
+                                        ToolRegistry tools,
+                                        FailingStateStore.FailurePoint failurePoint,
+                                        RunLimits runLimits, RetryWaiter retryWaiter,
+                                        Clock clock) throws Exception {
         AgentConfig config = new AgentConfigLoader().load(Map.of(
                 "apiKey", "test-key",
                 "dataDirectory", tempDirectory.resolve("state").toString()), Map.of());
-        SqliteStateStore store = SqliteStateStore.open(
+        DataDirectoryLock dataDirectoryLock = DataDirectoryLock.acquire(config.dataDirectory());
+        SqliteStateStore store = SqliteStateStore.open(dataDirectoryLock,
                 config.databasePath(), config.databaseBusyTimeout());
         StateStore effectiveStore = failurePoint == null
                 ? store : new FailingStateStore(store, failurePoint);
@@ -396,16 +836,45 @@ class AgentRunnerTest {
                 new WorkspaceResolver(config.dataDirectory()));
         WorkspaceDescriptor workspace = workspaces.register("Workspace", root);
         SessionRegistry sessions = new SessionRegistry(effectiveStore, workspaces);
-        AgentRunner runner = new AgentRunner(model,
-                new ToolDispatcher(tools, new SecretRedactor(config.apiKey())::redact,
-                        new ToolOutputTruncator()), objectMapper, config.model(),
+        ToolDispatcher dispatcher = new ToolDispatcher(tools,
+                new SecretRedactor(config.apiKey())::redact, new ToolOutputTruncator());
+        SecretRedactor redactor = new SecretRedactor(config.apiKey());
+        AgentRunner runner = new AgentRunner(model, dispatcher, objectMapper, config.model(),
                 config.maxResponseCharacters(), effectiveStore,
-                new ContextManager(new TokenEstimator()), new TurnDigestFactory());
+                new ContextManager(new TokenEstimator()), new TurnDigestFactory(),
+                new ModelRetryPolicy(), retryWaiter == null
+                ? RetryWaiter.cancellableSleep() : retryWaiter, clock, redactor);
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
-                DefaultAgentService.DEFAULT_SYSTEM_PROMPT);
+                DefaultAgentService.DEFAULT_SYSTEM_PROMPT, redactor);
         SessionDescriptor session = service.openSession(
                 new SessionConfig(workspace.workspaceId(), runLimits));
-        return new TestApplication(config, store, service, session);
+        return new TestApplication(config, dataDirectoryLock, store, service, session);
+    }
+
+    private static ScriptedModelClient oneToolModel() {
+        return new ScriptedModelClient(List.of(List.of(
+                new ModelStreamEvent.ResponseStarted("one"),
+                new ModelStreamEvent.ToolCallDelta(
+                        0, "call-1", "test_echo", "{\"value\":\"hello\"}"),
+                new ModelStreamEvent.ResponseFinished("tool_calls"),
+                new ModelStreamEvent.StreamEnded())));
+    }
+
+    private static ScriptedModelClient finalTextModel(String text) {
+        return new ScriptedModelClient(List.of(List.of(
+                new ModelStreamEvent.ResponseStarted("one"),
+                new ModelStreamEvent.TextDelta(text),
+                new ModelStreamEvent.ResponseFinished("stop"),
+                new ModelStreamEvent.StreamEnded())));
+    }
+
+    private static void assertSingleTerminalEvent(List<AgentEvent> events) {
+        long terminalEvents = events.stream().filter(event ->
+                event instanceof AgentEvent.TurnCompleted
+                        || event instanceof AgentEvent.TurnFailed
+                        || event instanceof AgentEvent.TurnCancelled
+                        || event instanceof AgentEvent.TurnLimitReached).count();
+        assertEquals(1, terminalEvents);
     }
 
     private Tool echoTool(AtomicInteger executions, Path expectedRoot) {
@@ -441,6 +910,7 @@ class AgentRunnerTest {
 
     private record TestApplication(
             AgentConfig config,
+            DataDirectoryLock dataDirectoryLock,
             SqliteStateStore store,
             DefaultAgentService service,
             SessionDescriptor session
@@ -463,5 +933,44 @@ class AgentRunnerTest {
                 sink.onEvent(event);
             }
         }
+    }
+
+    private static final class AdvancingClock extends Clock {
+        private final Instant initial;
+        private final Duration increment;
+        private final AtomicInteger reads = new AtomicInteger();
+
+        private AdvancingClock(Instant initial, Duration increment) {
+            this.initial = initial;
+            this.increment = increment;
+        }
+
+        @Override
+        public ZoneId getZone() { return ZoneOffset.UTC; }
+
+        @Override
+        public Clock withZone(ZoneId zone) { return this; }
+
+        @Override
+        public Instant instant() {
+            return initial.plus(increment.multipliedBy(reads.getAndIncrement()));
+        }
+    }
+
+    private static final class MutableClock extends Clock {
+        private Instant current;
+
+        private MutableClock(Instant current) { this.current = current; }
+
+        private void advance(Duration duration) { current = current.plus(duration); }
+
+        @Override
+        public ZoneId getZone() { return ZoneOffset.UTC; }
+
+        @Override
+        public Clock withZone(ZoneId zone) { return this; }
+
+        @Override
+        public Instant instant() { return current; }
     }
 }

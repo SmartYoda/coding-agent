@@ -32,7 +32,9 @@ class CanonicalHistoryStoreTest {
     void restoresOnlyCommittedCanonicalMessagesAndToolProtocol(@TempDir Path tempDirectory)
             throws Exception {
         AgentConfig config = config(tempDirectory);
-        SqliteStateStore store = open(config);
+        DataDirectoryLock initialLock = DataDirectoryLock.acquire(config.dataDirectory());
+        SqliteStateStore store = SqliteStateStore.open(initialLock,
+                config.databasePath(), config.databaseBusyTimeout());
         Path root = Files.createDirectory(tempDirectory.resolve("workspace"));
         WorkspaceDescriptor workspace = store.registerWorkspace("Workspace", root);
         SessionDescriptor session = store.createSessionWithSystemMessage(
@@ -44,6 +46,7 @@ class CanonicalHistoryStoreTest {
         fixture.clearFirstToolMetadata(turnId);
         fixture.insertDigest(turnId);
 
+        initialLock.close();
         CanonicalHistory history = open(config)
                 .loadCanonicalHistory(session.sessionId());
 
@@ -130,7 +133,9 @@ class CanonicalHistoryStoreTest {
     }
 
     private static SqliteStateStore open(AgentConfig config) {
-        return SqliteStateStore.open(config.databasePath(), config.databaseBusyTimeout());
+        DataDirectoryLock lock = DataDirectoryLock.acquire(config.dataDirectory());
+        return SqliteStateStore.open(lock, config.databasePath(),
+                config.databaseBusyTimeout());
     }
 
     private static RunLimits limits() {

@@ -18,6 +18,7 @@ import com.yoda.codingagent.core.context.ContextManager;
 import com.yoda.codingagent.core.context.TokenEstimator;
 import com.yoda.codingagent.core.context.TurnDigestFactory;
 import com.yoda.codingagent.core.error.AgentException;
+import com.yoda.codingagent.core.persistence.sqlite.DataDirectoryLock;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
 import com.yoda.codingagent.core.tool.ToolRegistry;
 import com.yoda.codingagent.core.tool.ToolDispatcher;
@@ -86,6 +87,7 @@ class WorkspaceServiceTest {
         WorkspaceDescriptor workspace = firstApplication.service()
                 .registerWorkspace("Temporary", root);
         Files.delete(root);
+        firstApplication.dataDirectoryLock().close();
 
         TestApplication restartedApplication = application(tempDirectory);
         WorkspaceDescriptor unavailable = restartedApplication.service().listWorkspaces().getFirst();
@@ -95,7 +97,10 @@ class WorkspaceServiceTest {
                 () -> restartedApplication.registry().activeContext(workspace.workspaceId()));
         assertEquals(ErrorCode.WORKSPACE_UNAVAILABLE, exception.errorCode());
 
-        SqliteStateStore independentlyReopened = SqliteStateStore.open(
+        restartedApplication.dataDirectoryLock().close();
+        DataDirectoryLock independentLock = DataDirectoryLock.acquire(
+                firstApplication.config().dataDirectory());
+        SqliteStateStore independentlyReopened = SqliteStateStore.open(independentLock,
                 firstApplication.config().databasePath(),
                 firstApplication.config().databaseBusyTimeout());
         assertEquals(WorkspaceStatus.UNAVAILABLE,
@@ -106,7 +111,8 @@ class WorkspaceServiceTest {
         AgentConfig config = new AgentConfigLoader().load(Map.of(
                 "apiKey", "test-key",
                 "dataDirectory", tempDirectory.resolve("state").toString()), Map.of());
-        SqliteStateStore stateStore = SqliteStateStore.open(
+        DataDirectoryLock dataDirectoryLock = DataDirectoryLock.acquire(config.dataDirectory());
+        SqliteStateStore stateStore = SqliteStateStore.open(dataDirectoryLock,
                 config.databasePath(), config.databaseBusyTimeout());
         WorkspaceRegistry registry = new WorkspaceRegistry(stateStore,
                 new WorkspaceResolver(config.dataDirectory()));
@@ -117,13 +123,16 @@ class WorkspaceServiceTest {
                 new SecretRedactor(config.apiKey())::redact, new ToolOutputTruncator()),
                 new ObjectMapper(), config.model(),
                 config.maxResponseCharacters(), stateStore,
-                new ContextManager(new TokenEstimator()), new TurnDigestFactory());
-        return new TestApplication(config, registry, new DefaultAgentService(
-                registry, sessionRegistry, runner, DefaultAgentService.DEFAULT_SYSTEM_PROMPT));
+                new ContextManager(new TokenEstimator()), new TurnDigestFactory(),
+                new SecretRedactor(config.apiKey()));
+        return new TestApplication(config, dataDirectoryLock, registry, new DefaultAgentService(
+                registry, sessionRegistry, runner, DefaultAgentService.DEFAULT_SYSTEM_PROMPT,
+                new SecretRedactor(config.apiKey())));
     }
 
     private record TestApplication(
             AgentConfig config,
+            DataDirectoryLock dataDirectoryLock,
             WorkspaceRegistry registry,
             AgentService service
     ) { }

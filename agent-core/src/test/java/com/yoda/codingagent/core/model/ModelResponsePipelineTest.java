@@ -151,6 +151,29 @@ class ModelResponsePipelineTest {
                         0, "late-call", "read_file", "{}")));
     }
 
+    @Test
+    void rejectsDuplicateFinishContentFilterAndIncompleteCompletedToolCall() {
+        ModelResponseAccumulator duplicate = new ModelResponseAccumulator(objectMapper, 4096);
+        duplicate.onEvent(new ModelStreamEvent.ResponseStarted("resp-1"));
+        duplicate.onEvent(new ModelStreamEvent.ResponseFinished("stop"));
+        assertThrows(AgentException.class, () -> duplicate.onEvent(
+                new ModelStreamEvent.ResponseFinished("stop")));
+
+        ModelResponseAccumulator filtered = new ModelResponseAccumulator(objectMapper, 4096);
+        filtered.onEvent(new ModelStreamEvent.ResponseStarted("resp-2"));
+        filtered.onEvent(new ModelStreamEvent.ResponseFinished("content_filter"));
+        filtered.onEvent(new ModelStreamEvent.StreamEnded());
+        assertThrows(AgentException.class, filtered::response);
+
+        ModelResponseAccumulator incomplete = new ModelResponseAccumulator(objectMapper, 4096);
+        incomplete.onEvent(new ModelStreamEvent.ResponseStarted("resp-3"));
+        incomplete.onEvent(new ModelStreamEvent.ToolCallDelta(
+                0, "call-1", "read_file", ""));
+        incomplete.onEvent(new ModelStreamEvent.ResponseFinished("tool_calls"));
+        incomplete.onEvent(new ModelStreamEvent.StreamEnded());
+        assertThrows(AgentException.class, incomplete::response);
+    }
+
     private static String frame(String json) {
         return "data: " + json.strip() + "\n\n";
     }

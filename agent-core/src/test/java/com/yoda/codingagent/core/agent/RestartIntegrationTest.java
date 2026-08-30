@@ -25,6 +25,7 @@ import com.yoda.codingagent.core.model.ModelClient;
 import com.yoda.codingagent.core.model.ModelRequest;
 import com.yoda.codingagent.core.model.ModelStreamEvent;
 import com.yoda.codingagent.core.model.ModelStreamSink;
+import com.yoda.codingagent.core.persistence.sqlite.DataDirectoryLock;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateFixture;
 import com.yoda.codingagent.core.tool.ToolRegistry;
@@ -72,6 +73,7 @@ class RestartIntegrationTest {
         var secondTurn = run(first, alphaOne, "a1-second-input");
         var alphaTwoTurn = run(first, alphaTwo, "a2-private-input");
         var betaTurn = run(first, betaOne, "b1-private-input");
+        first.dataDirectoryLock().close();
 
         FinalAnswerModel restartedModel = new FinalAnswerModel(List.of("a1-third-result"));
         TestApplication restarted = application(config, restartedModel);
@@ -138,7 +140,8 @@ class RestartIntegrationTest {
     }
 
     private static TestApplication application(AgentConfig config, ModelClient model) {
-        SqliteStateStore store = SqliteStateStore.open(
+        DataDirectoryLock dataDirectoryLock = DataDirectoryLock.acquire(config.dataDirectory());
+        SqliteStateStore store = SqliteStateStore.open(dataDirectoryLock,
                 config.databasePath(), config.databaseBusyTimeout());
         WorkspaceRegistry workspaces = new WorkspaceRegistry(store,
                 new WorkspaceResolver(config.dataDirectory()));
@@ -147,10 +150,12 @@ class RestartIntegrationTest {
                 new ToolDispatcher(new ToolRegistry(List.of()),
                         new SecretRedactor(config.apiKey())::redact, new ToolOutputTruncator()),
                 new ObjectMapper(), config.model(), config.maxResponseCharacters(), store,
-                new ContextManager(new TokenEstimator()), new TurnDigestFactory());
+                new ContextManager(new TokenEstimator()), new TurnDigestFactory(),
+                new SecretRedactor(config.apiKey()));
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
-                DefaultAgentService.DEFAULT_SYSTEM_PROMPT);
-        return new TestApplication(store, workspaces, service);
+                DefaultAgentService.DEFAULT_SYSTEM_PROMPT,
+                new SecretRedactor(config.apiKey()));
+        return new TestApplication(dataDirectoryLock, store, workspaces, service);
     }
 
     private static RunLimits limits() {
@@ -159,6 +164,7 @@ class RestartIntegrationTest {
     }
 
     private record TestApplication(
+            DataDirectoryLock dataDirectoryLock,
             SqliteStateStore store,
             WorkspaceRegistry workspaces,
             DefaultAgentService service

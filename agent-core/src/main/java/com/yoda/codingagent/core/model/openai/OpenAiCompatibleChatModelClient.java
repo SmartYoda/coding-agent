@@ -17,11 +17,20 @@ import com.yoda.codingagent.core.tool.ToolDefinition;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
+import java.net.ConnectException;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.channels.UnresolvedAddressException;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
@@ -48,19 +57,26 @@ public final class OpenAiCompatibleChatModelClient implements ModelClient {
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
     private final URI endpoint;
+    private final Clock clock;
 
     public OpenAiCompatibleChatModelClient(AgentConfig config) {
         this(config, HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(20))
                 .followRedirects(HttpClient.Redirect.NEVER)
-                .build(), new ObjectMapper());
+                .build(), new ObjectMapper(), Clock.systemUTC());
     }
 
     public OpenAiCompatibleChatModelClient(
             AgentConfig config, HttpClient httpClient, ObjectMapper objectMapper) {
+        this(config, httpClient, objectMapper, Clock.systemUTC());
+    }
+
+    public OpenAiCompatibleChatModelClient(
+            AgentConfig config, HttpClient httpClient, ObjectMapper objectMapper, Clock clock) {
         this.config = Objects.requireNonNull(config, "config");
         this.httpClient = Objects.requireNonNull(httpClient, "httpClient");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
+        this.clock = Objects.requireNonNull(clock, "clock");
         this.endpoint = chatCompletionsEndpoint(config.baseUrl());
     }
 
@@ -116,8 +132,13 @@ public final class OpenAiCompatibleChatModelClient implements ModelClient {
             }
             try (InputStream body = response.body()) {
                 if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                    discardLimited(body);
-                    throw statusError(response.statusCode());
+                    try {
+                        discardLimited(body);
+                    } catch (IOException ignored) {
+                        // The HTTP status remains the authoritative failure classification.
+                    }
+                    throw statusError(response.statusCode(),
+                            response.headers().firstValue("Retry-After").orElse(null));
                 }
                 ChatCompletionsStreamParser chunkParser =
                         new ChatCompletionsStreamParser(objectMapper);
@@ -135,6 +156,13 @@ public final class OpenAiCompatibleChatModelClient implements ModelClient {
                     markDeadlineIfExceeded(deadlineExceeded, startedAt, timeoutNanos), exception);
         } catch (ExecutionException exception) {
             Throwable cause = exception.getCause();
+            if (cause instanceof HttpConnectTimeoutException
+                    || cause instanceof ConnectException
+                    || cause instanceof UnknownHostException
+                    || cause instanceof UnresolvedAddressException) {
+                throw new AgentException(ErrorCode.MODEL_UNAVAILABLE,
+                        "could not connect to the model service", cause);
+            }
             if (cause instanceof java.net.http.HttpTimeoutException) {
                 throw new AgentException(ErrorCode.MODEL_TIMEOUT,
                         "model request timed out", cause);
@@ -333,21 +361,50 @@ public final class OpenAiCompatibleChatModelClient implements ModelClient {
                 "model stream was interrupted", cause);
     }
 
-    private static AgentException statusError(int statusCode) {
+    private AgentException statusError(int statusCode, String retryAfterHeader) {
         return switch (statusCode) {
             case 401, 403 -> new AgentException(ErrorCode.MODEL_AUTHENTICATION,
                     "model service rejected authentication");
             case 429 -> new AgentException(ErrorCode.MODEL_RATE_LIMIT,
-                    "model service rate limit reached");
+                    "model service rate limit reached", parseRetryAfter(retryAfterHeader));
             default -> {
                 if (statusCode >= 500) {
                     yield new AgentException(ErrorCode.MODEL_UNAVAILABLE,
-                            "model service is unavailable");
+                            "model service is unavailable", parseRetryAfter(retryAfterHeader));
                 }
                 yield new AgentException(ErrorCode.MODEL_PROTOCOL_ERROR,
                         "model service rejected the request (HTTP " + statusCode + ")");
             }
         };
+    }
+
+    private Duration parseRetryAfter(String rawValue) {
+        if (rawValue == null || rawValue.isBlank()) {
+            return null;
+        }
+        String value = rawValue.trim();
+        try {
+            long seconds = Long.parseLong(value);
+            if (seconds < 0) {
+                return null;
+            }
+            return clampRetryAfter(Duration.ofSeconds(seconds));
+        } catch (NumberFormatException | ArithmeticException ignored) {
+            // Try the HTTP-date form next.
+        }
+        try {
+            Instant retryAt = ZonedDateTime.parse(
+                    value, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant();
+            Duration delay = Duration.between(clock.instant(), retryAt);
+            return clampRetryAfter(delay.isNegative() ? Duration.ZERO : delay);
+        } catch (DateTimeParseException | ArithmeticException ignored) {
+            return null;
+        }
+    }
+
+    private static Duration clampRetryAfter(Duration delay) {
+        return delay.compareTo(Duration.ofSeconds(30)) > 0
+                ? Duration.ofSeconds(30) : delay;
     }
 
     private static void checkCancelled(CancellationToken token) {

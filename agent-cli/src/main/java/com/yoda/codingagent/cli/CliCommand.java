@@ -1,0 +1,124 @@
+package com.yoda.codingagent.cli;
+
+import com.yoda.codingagent.core.api.SessionId;
+import com.yoda.codingagent.core.api.WorkspaceId;
+import java.nio.file.Path;
+import java.util.Locale;
+import java.util.UUID;
+
+sealed interface CliCommand permits CliCommand.Prompt, CliCommand.Help, CliCommand.Exit,
+        CliCommand.Cancel, CliCommand.Context, CliCommand.WorkspaceList,
+        CliCommand.WorkspaceAdd, CliCommand.WorkspaceUse, CliCommand.WorkspaceArchive,
+        CliCommand.SessionList, CliCommand.SessionNew, CliCommand.SessionUse,
+        CliCommand.SessionClose {
+
+    static CliCommand parse(String input) {
+        if (input == null) {
+            return new Exit();
+        }
+        String line = input.trim();
+        if (line.isEmpty()) {
+            throw new IllegalArgumentException("command must not be blank");
+        }
+        if (!line.startsWith("/")) {
+            return new Prompt(input);
+        }
+        String[] parts = line.split("\\s+", 4);
+        String root = parts[0].toLowerCase(Locale.ROOT);
+        return switch (root) {
+            case "/help" -> requireArity(parts, 1, new Help());
+            case "/exit" -> requireArity(parts, 1, new Exit());
+            case "/cancel" -> requireArity(parts, 1, new Cancel());
+            case "/context" -> requireArity(parts, 1, new Context());
+            case "/workspace" -> parseWorkspace(parts);
+            case "/session" -> parseSession(parts);
+            default -> throw new IllegalArgumentException("unknown command: " + parts[0]);
+        };
+    }
+
+    private static CliCommand parseWorkspace(String[] parts) {
+        if (parts.length < 2) {
+            throw new IllegalArgumentException("usage: /workspace list|add|use|archive");
+        }
+        return switch (parts[1].toLowerCase(Locale.ROOT)) {
+            case "list" -> requireArity(parts, 2, new WorkspaceList());
+            case "add" -> {
+                if (parts.length != 4) {
+                    throw new IllegalArgumentException("usage: /workspace add <name> <path>");
+                }
+                yield new WorkspaceAdd(parts[2], Path.of(parts[3]));
+            }
+            case "use" -> {
+                requireLength(parts, 3, "usage: /workspace use <workspace-id>");
+                yield new WorkspaceUse(workspaceId(parts[2]));
+            }
+            case "archive" -> {
+                requireLength(parts, 3, "usage: /workspace archive <workspace-id>");
+                yield new WorkspaceArchive(workspaceId(parts[2]));
+            }
+            default -> throw new IllegalArgumentException("unknown workspace command");
+        };
+    }
+
+    private static CliCommand parseSession(String[] parts) {
+        if (parts.length < 2) {
+            throw new IllegalArgumentException("usage: /session list|new|use|close");
+        }
+        return switch (parts[1].toLowerCase(Locale.ROOT)) {
+            case "list" -> requireArity(parts, 2, new SessionList());
+            case "new" -> requireArity(parts, 2, new SessionNew());
+            case "use" -> {
+                requireLength(parts, 3, "usage: /session use <session-id>");
+                yield new SessionUse(sessionId(parts[2]));
+            }
+            case "close" -> {
+                if (parts.length > 3) {
+                    throw new IllegalArgumentException("usage: /session close [session-id]");
+                }
+                yield new SessionClose(parts.length == 3 ? sessionId(parts[2]) : null);
+            }
+            default -> throw new IllegalArgumentException("unknown session command");
+        };
+    }
+
+    private static <T extends CliCommand> T requireArity(String[] parts, int expected, T value) {
+        requireLength(parts, expected, "command does not accept arguments");
+        return value;
+    }
+
+    private static void requireLength(String[] parts, int expected, String message) {
+        if (parts.length != expected) {
+            throw new IllegalArgumentException(message);
+        }
+    }
+
+    private static WorkspaceId workspaceId(String value) {
+        try {
+            return new WorkspaceId(UUID.fromString(value));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("invalid workspace id", exception);
+        }
+    }
+
+    private static SessionId sessionId(String value) {
+        try {
+            return new SessionId(UUID.fromString(value));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("invalid session id", exception);
+        }
+    }
+
+    record Prompt(String text) implements CliCommand { }
+    record Help() implements CliCommand { }
+    record Exit() implements CliCommand { }
+    record Cancel() implements CliCommand { }
+    record Context() implements CliCommand { }
+    record WorkspaceList() implements CliCommand { }
+    record WorkspaceAdd(String name, Path path) implements CliCommand { }
+    record WorkspaceUse(WorkspaceId workspaceId) implements CliCommand { }
+    record WorkspaceArchive(WorkspaceId workspaceId) implements CliCommand { }
+    record SessionList() implements CliCommand { }
+    record SessionNew() implements CliCommand { }
+    record SessionUse(SessionId sessionId) implements CliCommand { }
+    record SessionClose(SessionId sessionId) implements CliCommand { }
+}

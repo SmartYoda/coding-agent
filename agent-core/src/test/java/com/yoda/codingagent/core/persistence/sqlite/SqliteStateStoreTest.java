@@ -32,7 +32,9 @@ class SqliteStateStoreTest {
         AgentConfig config = config(dataDirectory, 1375);
         assertFalse(Files.exists(dataDirectory));
 
-        SqliteStateStore firstStore = open(config);
+        DataDirectoryLock firstLock = DataDirectoryLock.acquire(config.dataDirectory());
+        SqliteStateStore firstStore = SqliteStateStore.open(firstLock,
+                config.databasePath(), config.databaseBusyTimeout());
         WorkspaceDescriptor alpha = firstStore.registerWorkspace("Alpha",
                 tempDirectory.resolve("alpha"));
         WorkspaceDescriptor beta = firstStore.registerWorkspace(" Beta ",
@@ -44,6 +46,7 @@ class SqliteStateStoreTest {
         assertEquals(WorkspaceStatus.ACTIVE, alpha.status());
         assertEquals(List.of(alpha, beta), firstStore.listWorkspaces());
 
+        firstLock.close();
         SqliteStateStore reopenedStore = open(config);
         assertEquals(List.of(alpha, beta), reopenedStore.listWorkspaces());
         assertEquals("wal", journalMode(config.databasePath()));
@@ -94,7 +97,9 @@ class SqliteStateStoreTest {
     }
 
     private static SqliteStateStore open(AgentConfig config) {
-        return SqliteStateStore.open(config.databasePath(), config.databaseBusyTimeout());
+        DataDirectoryLock lock = DataDirectoryLock.acquire(config.dataDirectory());
+        return SqliteStateStore.open(lock, config.databasePath(),
+                config.databaseBusyTimeout());
     }
 
     private static String journalMode(Path databasePath) throws Exception {

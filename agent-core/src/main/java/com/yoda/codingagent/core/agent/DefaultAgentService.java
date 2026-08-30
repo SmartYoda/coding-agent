@@ -7,9 +7,11 @@ import com.yoda.codingagent.core.api.AgentResult;
 import com.yoda.codingagent.core.api.CancellationToken;
 import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
+import com.yoda.codingagent.core.api.SessionContextSummary;
 import com.yoda.codingagent.core.api.SessionId;
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.api.WorkspaceId;
+import com.yoda.codingagent.core.config.SecretRedactor;
 import com.yoda.codingagent.core.workspace.WorkspaceRegistry;
 import java.nio.file.Path;
 import java.util.List;
@@ -28,14 +30,17 @@ public final class DefaultAgentService implements AgentService {
     private final SessionRegistry sessionRegistry;
     private final AgentRunner agentRunner;
     private final String systemPrompt;
+    private final SecretRedactor secretRedactor;
 
     public DefaultAgentService(WorkspaceRegistry workspaceRegistry,
                                SessionRegistry sessionRegistry,
                                AgentRunner agentRunner,
-                               String systemPrompt) {
+                               String systemPrompt,
+                               SecretRedactor secretRedactor) {
         this.workspaceRegistry = Objects.requireNonNull(workspaceRegistry, "workspaceRegistry");
         this.sessionRegistry = Objects.requireNonNull(sessionRegistry, "sessionRegistry");
         this.agentRunner = Objects.requireNonNull(agentRunner, "agentRunner");
+        this.secretRedactor = Objects.requireNonNull(secretRedactor, "secretRedactor");
         if (systemPrompt == null || systemPrompt.isBlank()) {
             throw new IllegalArgumentException("systemPrompt must not be blank");
         }
@@ -73,6 +78,11 @@ public final class DefaultAgentService implements AgentService {
     }
 
     @Override
+    public SessionContextSummary getSessionContext(SessionId sessionId) {
+        return sessionRegistry.contextSummary(sessionId);
+    }
+
+    @Override
     public void closeSession(SessionId sessionId) {
         sessionRegistry.close(sessionId);
     }
@@ -82,7 +92,10 @@ public final class DefaultAgentService implements AgentService {
                                AgentEventSink eventSink,
                                CancellationToken cancellationToken) {
         try (SessionRegistry.Lease lease = sessionRegistry.acquire(sessionId)) {
-            return agentRunner.run(lease.session(), request, eventSink, cancellationToken);
+            Objects.requireNonNull(request, "request");
+            AgentRequest safeRequest = new AgentRequest(
+                    secretRedactor.redact(request.input()));
+            return agentRunner.run(lease.session(), safeRequest, eventSink, cancellationToken);
         }
     }
 }

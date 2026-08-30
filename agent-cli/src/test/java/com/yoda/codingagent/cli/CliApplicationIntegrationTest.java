@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.yoda.codingagent.core.api.CancellationToken;
+import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.config.AgentConfig;
 import com.yoda.codingagent.core.config.AgentConfigLoader;
 import com.yoda.codingagent.core.model.ModelClient;
@@ -13,6 +14,7 @@ import com.yoda.codingagent.core.model.ModelRequest;
 import com.yoda.codingagent.core.model.ModelStreamEvent;
 import com.yoda.codingagent.core.model.ModelStreamSink;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
+import com.yoda.codingagent.core.persistence.sqlite.DataDirectoryLock;
 import com.yoda.codingagent.core.tool.ToolStatus;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -22,6 +24,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -73,7 +76,7 @@ class CliApplicationIntegrationTest {
         int exit = new CliApplication(ignored -> scripted).run(new String[]{
                         "--workspace", "fixture=" + workspace,
                         "--data-dir", state.toString()}, Map.of("LLM_API_KEY", "offline-key"),
-                new ByteArrayInputStream("fix it\n/exit\n".getBytes(StandardCharsets.UTF_8)),
+                inputAfter(() -> step.get() == 5, "fix it\n/exit\n"),
                 output, error);
 
         assertEquals(0, exit, error.toString(StandardCharsets.UTF_8));
@@ -83,7 +86,8 @@ class CliApplicationIntegrationTest {
         AgentConfig config = new AgentConfigLoader().load(
                 Map.of("dataDirectory", state.toString()),
                 Map.of("LLM_API_KEY", "offline-key"));
-        SqliteStateStore store = SqliteStateStore.open(
+        DataDirectoryLock lock = DataDirectoryLock.acquire(config.dataDirectory());
+        SqliteStateStore store = SqliteStateStore.open(lock,
                 config.databasePath(), config.databaseBusyTimeout());
         var registered = store.listWorkspaces();
         var session = store.listSessions(registered.getFirst().workspaceId()).getFirst();
@@ -121,7 +125,7 @@ class CliApplicationIntegrationTest {
         int exit = new CliApplication(ignored -> scripted).run(new String[]{
                         "--workspace", "main=" + workspace,
                         "--data-dir", state.toString()}, environment,
-                new ByteArrayInputStream("hello\n/exit\n".getBytes(StandardCharsets.UTF_8)),
+                inputAfter(() -> requests.get() == 1, "hello\n/exit\n"),
                 output, error);
 
         assertEquals(0, exit, error.toString(StandardCharsets.UTF_8));
@@ -130,7 +134,8 @@ class CliApplicationIntegrationTest {
         assertFalse(output.toString(StandardCharsets.UTF_8).contains("offline-key"));
         AgentConfig config = new AgentConfigLoader().load(
                 Map.of("dataDirectory", state.toString()), environment);
-        SqliteStateStore store = SqliteStateStore.open(
+        DataDirectoryLock lock = DataDirectoryLock.acquire(config.dataDirectory());
+        SqliteStateStore store = SqliteStateStore.open(lock,
                 config.databasePath(), config.databaseBusyTimeout());
         var registered = store.listWorkspaces();
         assertEquals(1, registered.size());
@@ -146,7 +151,9 @@ class CliApplicationIntegrationTest {
         Path otherWorkspace = Files.createDirectory(temp.resolve("other-workspace"));
         Path state = temp.resolve("state");
         Map<String, String> environment = Map.of("LLM_API_KEY", "offline-key");
+        AtomicInteger completedRequests = new AtomicInteger();
         ModelClient finalModel = (request, sink, token) -> {
+            completedRequests.incrementAndGet();
             sink.onEvent(new ModelStreamEvent.ResponseStarted("response"));
             sink.onEvent(new ModelStreamEvent.TextDelta("done"));
             sink.onEvent(new ModelStreamEvent.ResponseFinished("stop"));
@@ -157,19 +164,23 @@ class CliApplicationIntegrationTest {
                 "--data-dir", state.toString()};
 
         assertEquals(0, application.run(baseArguments, environment,
-                input("first\n/exit\n"), new ByteArrayOutputStream(),
+                inputAfter(() -> completedRequests.get() >= 1, "first\n/exit\n"),
+                new ByteArrayOutputStream(),
                 new ByteArrayOutputStream()));
         AgentConfig config = new AgentConfigLoader().load(
                 Map.of("dataDirectory", state.toString()), environment);
-        SqliteStateStore store = SqliteStateStore.open(
+        DataDirectoryLock lock = DataDirectoryLock.acquire(config.dataDirectory());
+        SqliteStateStore store = SqliteStateStore.open(lock,
                 config.databasePath(), config.databaseBusyTimeout());
         var registered = store.listWorkspaces();
         var session = store.listSessions(registered.getFirst().workspaceId()).getFirst();
+        lock.close();
 
         assertEquals(0, application.run(new String[]{"--workspace", "main=" + workspace,
                         "--data-dir", state.toString(), "--session",
-                        session.sessionId().value().toString()}, environment,
-                input("second\n/exit\n"), new ByteArrayOutputStream(),
+                session.sessionId().value().toString()}, environment,
+                inputAfter(() -> completedRequests.get() >= 2, "second\n/exit\n"),
+                new ByteArrayOutputStream(),
                 new ByteArrayOutputStream()));
         assertEquals(2, store.loadCanonicalHistory(session.sessionId()).completedTurns().size());
 
@@ -211,6 +222,56 @@ class CliApplicationIntegrationTest {
         assertTrue(output.toString(StandardCharsets.UTF_8).contains("Usage:"));
     }
 
+    @Test
+    void compositionFailureReleasesTheDataDirectoryLock(@TempDir Path temp) throws Exception {
+        Path workspace = Files.createDirectory(temp.resolve("workspace"));
+        Path state = temp.resolve("state");
+        String[] arguments = {"--workspace", "main=" + workspace,
+                "--data-dir", state.toString()};
+        Map<String, String> environment = Map.of("LLM_API_KEY", "offline-key");
+        int failed = new CliApplication(ignored -> {
+            throw new IllegalStateException("synthetic composition failure");
+        }).run(arguments, environment, input("/exit\n"),
+                new ByteArrayOutputStream(), new ByteArrayOutputStream());
+        assertEquals(1, failed);
+
+        int restarted = new CliApplication(ignored -> (request, sink, token) -> {
+            throw new AssertionError("model must not be called");
+        }).run(arguments, environment, input("/exit\n"),
+                new ByteArrayOutputStream(), new ByteArrayOutputStream());
+        assertEquals(0, restarted);
+    }
+
+    @Test
+    void firstInteractiveStartupRendersRecoverySummary(@TempDir Path temp) throws Exception {
+        Path workspace = Files.createDirectory(temp.resolve("workspace"));
+        Path state = temp.resolve("state");
+        Map<String, String> environment = Map.of("LLM_API_KEY", "offline-key");
+        AgentConfig config = new AgentConfigLoader().load(
+                Map.of("dataDirectory", state.toString()), environment);
+        DataDirectoryLock initialLock = DataDirectoryLock.acquire(config.dataDirectory());
+        SqliteStateStore initial = SqliteStateStore.open(initialLock,
+                config.databasePath(), config.databaseBusyTimeout());
+        var registered = initial.registerWorkspace("main", workspace.toRealPath());
+        var session = initial.createSessionWithSystemMessage(
+                new com.yoda.codingagent.core.api.SessionConfig(
+                        registered.workspaceId(), config.defaultRunLimits()), "system");
+        initial.beginTurn(TurnId.random(), session.sessionId(), java.time.Instant.now(),
+                "interrupted input");
+        initialLock.close();
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+
+        int exit = new CliApplication(ignored -> (request, sink, token) -> {
+            throw new AssertionError("model must not be called");
+        }).run(new String[]{"--workspace", "main=" + workspace,
+                        "--data-dir", state.toString()}, environment, input("/exit\n"),
+                output, new ByteArrayOutputStream());
+
+        assertEquals(0, exit);
+        assertTrue(output.toString(StandardCharsets.UTF_8)
+                .contains("Recovered interrupted state: turns=1"));
+    }
+
     private static void toolCall(ModelStreamSink sink, String callId,
                                  String name, String arguments) {
         sink.onEvent(new ModelStreamEvent.ResponseStarted(callId));
@@ -222,6 +283,55 @@ class CliApplicationIntegrationTest {
 
     private static ByteArrayInputStream input(String value) {
         return new ByteArrayInputStream(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static java.io.InputStream inputAfter(BooleanSupplier ready, String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        int pauseAt = value.indexOf('\n') + 1;
+        return new java.io.InputStream() {
+            private int index;
+            private boolean waited;
+
+            @Override
+            public int read() throws java.io.IOException {
+                awaitIfNeeded();
+                return index >= bytes.length ? -1 : bytes[index++] & 0xff;
+            }
+
+            @Override
+            public int read(byte[] target, int offset, int length) throws java.io.IOException {
+                if (index >= bytes.length) {
+                    return -1;
+                }
+                awaitIfNeeded();
+                int allowed = !waited && index < pauseAt
+                        ? Math.min(length, pauseAt - index) : length;
+                int copied = Math.min(allowed, bytes.length - index);
+                System.arraycopy(bytes, index, target, offset, copied);
+                index += copied;
+                return copied;
+            }
+
+            private void awaitIfNeeded() throws java.io.IOException {
+                if (waited || index < pauseAt) {
+                    return;
+                }
+                waited = true;
+                long deadline = System.nanoTime()
+                        + java.util.concurrent.TimeUnit.SECONDS.toNanos(15);
+                while (!ready.getAsBoolean() && System.nanoTime() < deadline) {
+                    try {
+                        Thread.sleep(10);
+                    } catch (InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                        throw new java.io.IOException("interrupted while awaiting turn", exception);
+                    }
+                }
+                if (!ready.getAsBoolean()) {
+                    throw new java.io.IOException("turn did not reach expected state");
+                }
+            }
+        };
     }
 
     private static void assertLastToolStatus(ModelRequest request, ToolStatus status) {

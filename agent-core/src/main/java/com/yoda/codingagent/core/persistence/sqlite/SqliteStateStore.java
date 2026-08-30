@@ -8,6 +8,7 @@ import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
+import com.yoda.codingagent.core.api.SessionContextSummary;
 import com.yoda.codingagent.core.api.SessionId;
 import com.yoda.codingagent.core.api.SessionStatus;
 import com.yoda.codingagent.core.api.TurnId;
@@ -52,19 +53,30 @@ public final class SqliteStateStore implements StateStore {
     private static final int MAX_DIGESTS_LOADED = 512;
 
     private final SQLiteDataSource dataSource;
+    private final DataDirectoryLock dataDirectoryLock;
     private final Path databasePath;
     private final int busyTimeoutMillis;
+    private RecoverySummary startupRecoverySummary = new RecoverySummary(0, 0, 0, 0);
 
-    private SqliteStateStore(SQLiteDataSource dataSource, Path databasePath,
+    private SqliteStateStore(SQLiteDataSource dataSource, DataDirectoryLock dataDirectoryLock,
+                             Path databasePath,
                              int busyTimeoutMillis) {
         this.dataSource = dataSource;
+        this.dataDirectoryLock = dataDirectoryLock;
         this.databasePath = databasePath;
         this.busyTimeoutMillis = busyTimeoutMillis;
     }
 
-    public static SqliteStateStore open(Path requestedDatabasePath, Duration busyTimeout) {
+    public static SqliteStateStore open(DataDirectoryLock dataDirectoryLock,
+                                        Path requestedDatabasePath,
+                                        Duration busyTimeout) {
         Path databasePath = Objects.requireNonNull(requestedDatabasePath, "databasePath")
                 .toAbsolutePath().normalize();
+        if (dataDirectoryLock == null) {
+            throw new AgentException(ErrorCode.STORAGE_ERROR,
+                    "data directory lock is required");
+        }
+        dataDirectoryLock.requireHeldFor(databasePath);
         Objects.requireNonNull(busyTimeout, "busyTimeout");
         long busyMillis = busyTimeout.toMillis();
         if (busyMillis < 1 || busyMillis > 60_000) {
@@ -83,10 +95,11 @@ public final class SqliteStateStore implements StateStore {
                     .migrate();
 
             int busyTimeoutMillis = Math.toIntExact(busyMillis);
-            SqliteStateStore store = new SqliteStateStore(dataSource, databasePath,
+            SqliteStateStore store = new SqliteStateStore(dataSource, dataDirectoryLock,
+                    databasePath,
                     busyTimeoutMillis);
             store.initializeDatabase();
-            store.recoverInterruptedTurns();
+            store.startupRecoverySummary = store.recoverInterruptedTurns();
             return store;
         } catch (IOException | RuntimeException exception) {
             if (exception instanceof AgentException agentException) {
@@ -95,6 +108,10 @@ public final class SqliteStateStore implements StateStore {
             throw storageFailure("cannot initialize state database at " + databasePath,
                     exception);
         }
+    }
+
+    public RecoverySummary startupRecoverySummary() {
+        return startupRecoverySummary;
     }
 
     @Override
@@ -307,6 +324,45 @@ public final class SqliteStateStore implements StateStore {
     }
 
     @Override
+    public SessionContextSummary loadSessionContextSummary(SessionId sessionId) {
+        Objects.requireNonNull(sessionId, "sessionId");
+        return withConnection(connection -> {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT s.workspace_id, s.limits_json,
+                           (SELECT COUNT(*) FROM turns t
+                            WHERE t.session_id = s.id AND t.status = 'COMPLETED')
+                               AS completed_turn_count,
+                           (SELECT COUNT(*) FROM turn_digests d
+                            JOIN turns t ON t.id = d.turn_id
+                            WHERE t.session_id = s.id AND t.status = 'COMPLETED')
+                               AS digest_count
+                    FROM sessions s
+                    WHERE s.id = ?
+                    """)) {
+                statement.setString(1, sessionId.value().toString());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    if (!resultSet.next()) {
+                        throw new AgentException(ErrorCode.UNKNOWN_SESSION,
+                                "session does not exist");
+                    }
+                    try {
+                        return new SessionContextSummary(sessionId,
+                                new WorkspaceId(UUID.fromString(
+                                        resultSet.getString("workspace_id"))),
+                                deserializeLimits(resultSet.getString("limits_json")),
+                                resultSet.getInt("completed_turn_count"),
+                                resultSet.getInt("digest_count"));
+                    } catch (IllegalArgumentException exception) {
+                        throw storageFailure(
+                                "state database contains an invalid session context summary",
+                                exception);
+                    }
+                }
+            }
+        });
+    }
+
+    @Override
     public void closeSession(SessionId sessionId) {
         Objects.requireNonNull(sessionId, "sessionId");
         withTransaction(connection -> {
@@ -345,6 +401,17 @@ public final class SqliteStateStore implements StateStore {
         return withConnection(connection -> {
             WorkspaceId workspaceId = findSessionWorkspace(connection, sessionId);
             RunLimits limits = findSessionLimits(connection, sessionId);
+            int totalCompletedTurnCount;
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT COUNT(*) FROM turns
+                    WHERE session_id = ? AND status = 'COMPLETED'
+                    """)) {
+                statement.setString(1, sessionId.value().toString());
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    resultSet.next();
+                    totalCompletedTurnCount = resultSet.getInt(1);
+                }
+            }
             int recentFullTurns = limits.recentFullTurns();
             Map<String, List<ToolCall>> toolCallsByStep = loadCommittedToolCalls(
                     connection, sessionId, recentFullTurns);
@@ -391,7 +458,8 @@ public final class SqliteStateStore implements StateStore {
                 }
             }
             try {
-                return new CanonicalHistory(sessionId, workspaceId, messages, digests);
+                return new CanonicalHistory(sessionId, workspaceId, messages, digests,
+                        totalCompletedTurnCount);
             } catch (IllegalArgumentException exception) {
                 throw storageFailure("state database contains invalid canonical history",
                         exception);
@@ -444,7 +512,10 @@ public final class SqliteStateStore implements StateStore {
     }
 
     @Override
-    public void markTurnStreaming(TurnId turnId) {
+    public void markTurnStreaming(TurnId turnId, int stepNo) {
+        if (stepNo < 1) {
+            throw new IllegalArgumentException("stepNo must be positive");
+        }
         transitionTurn(Objects.requireNonNull(turnId, "turnId"),
                 "RUNNING", "STREAMING_MODEL");
     }
@@ -579,16 +650,18 @@ public final class SqliteStateStore implements StateStore {
 
     @Override
     public void completeTurn(TurnId turnId, int stepNo, ModelResponse response,
-                             int contextEstimatedTokens, TurnDigest digest) {
+                             int contextEstimatedTokens, TurnDigest digest,
+                             Instant finishedAt) {
         Objects.requireNonNull(turnId, "turnId");
         Objects.requireNonNull(response, "response");
         Objects.requireNonNull(digest, "digest");
+        Objects.requireNonNull(finishedAt, "finishedAt");
         if (!response.toolCalls().isEmpty() || response.visibleText().isBlank()
                 || !digest.turnId().equals(turnId) || stepNo < 1) {
             throw new IllegalArgumentException("invalid final model step");
         }
         UUID stepId = UUID.randomUUID();
-        long now = Instant.now().toEpochMilli();
+        long now = finishedAt.toEpochMilli();
         withTransaction(connection -> {
             insertModelStep(connection, stepId, turnId, stepNo, response, contextEstimatedTokens,
                     ModelStepStatus.COMMITTED, now);
@@ -621,16 +694,18 @@ public final class SqliteStateStore implements StateStore {
     }
 
     @Override
-    public void failTurn(TurnId turnId, TurnStatus status, ErrorCode reason) {
+    public void failTurn(TurnId turnId, TurnStatus status, ErrorCode reason,
+                         Instant finishedAt) {
         Objects.requireNonNull(turnId, "turnId");
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(reason, "reason");
+        Objects.requireNonNull(finishedAt, "finishedAt");
         if (status != TurnStatus.FAILED && status != TurnStatus.CANCELLED
                 && status != TurnStatus.LIMIT_REACHED && status != TurnStatus.INTERRUPTED) {
             throw new IllegalArgumentException("invalid unsuccessful terminal status");
         }
         withTransaction(connection -> {
-            long now = Instant.now().toEpochMilli();
+            long now = finishedAt.toEpochMilli();
             try (PreparedStatement statement = connection.prepareStatement("""
                     UPDATE tool_calls
                     SET execution_status = 'UNKNOWN', completed_at = ?, updated_at = ?

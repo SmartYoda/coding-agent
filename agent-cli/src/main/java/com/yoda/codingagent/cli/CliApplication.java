@@ -21,6 +21,7 @@ import com.yoda.codingagent.core.context.TurnDigestFactory;
 import com.yoda.codingagent.core.model.ModelClient;
 import com.yoda.codingagent.core.model.openai.OpenAiCompatibleChatModelClient;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
+import com.yoda.codingagent.core.persistence.sqlite.DataDirectoryLock;
 import com.yoda.codingagent.core.tool.Tool;
 import com.yoda.codingagent.core.tool.ToolDispatcher;
 import com.yoda.codingagent.core.tool.ToolOutputTruncator;
@@ -45,6 +46,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.Executors;
 import java.util.function.Function;
 
 public final class CliApplication {
@@ -74,10 +76,13 @@ public final class CliApplication {
             AgentConfig config = new AgentConfigLoader().load(
                     cli.configOverrides(), environment);
             redactor = new SecretRedactor(config.apiKey());
-            AgentService service = compose(config);
-            WorkspaceDescriptor workspace = selectWorkspace(service, cli);
-            SessionDescriptor session = selectSession(service, workspace, cli, config);
-            return interact(service, session, input, out, redactor);
+            try (CliRuntime runtime = compose(config)) {
+                AgentService service = runtime.service();
+                WorkspaceDescriptor workspace = selectWorkspace(service, cli);
+                SessionDescriptor session = selectSession(service, workspace, cli, config);
+                return interact(service, workspace, session, config, runtime,
+                        input, out, redactor);
+            }
         } catch (IllegalArgumentException exception) {
             err.println("Configuration error: " + redactor.redact(exception.getMessage()));
             return 2;
@@ -89,27 +94,38 @@ public final class CliApplication {
         }
     }
 
-    private AgentService compose(AgentConfig config) {
+    private CliRuntime compose(AgentConfig config) {
         ObjectMapper objectMapper = new ObjectMapper();
-        SqliteStateStore store = SqliteStateStore.open(
-                config.databasePath(), config.databaseBusyTimeout());
-        WorkspaceRegistry workspaces = new WorkspaceRegistry(
-                store, new WorkspaceResolver(config.dataDirectory()));
-        SessionRegistry sessions = new SessionRegistry(store, workspaces);
-        List<Tool> tools = List.of(
-                new ListFilesTool(config.dataDirectory()),
-                new ReadFileTool(config.dataDirectory()),
-                new SearchTextTool(config.dataDirectory()),
-                new WriteFileTool(config.dataDirectory()),
-                new ReplaceInFileTool(config.dataDirectory()),
-                new ExecuteCommandTool(config.dataDirectory(), new CommandRunner()));
-        ToolDispatcher dispatcher = new ToolDispatcher(new ToolRegistry(tools),
-                new SecretRedactor(config.apiKey())::redact, new ToolOutputTruncator());
-        AgentRunner runner = new AgentRunner(modelClientFactory.apply(config), dispatcher,
-                objectMapper, config.model(), config.maxResponseCharacters(), store,
-                new ContextManager(new TokenEstimator()), new TurnDigestFactory());
-        return new DefaultAgentService(workspaces, sessions, runner,
-                DefaultAgentService.DEFAULT_SYSTEM_PROMPT);
+        DataDirectoryLock dataDirectoryLock = DataDirectoryLock.acquire(config.dataDirectory());
+        try {
+            SqliteStateStore store = SqliteStateStore.open(dataDirectoryLock,
+                    config.databasePath(), config.databaseBusyTimeout());
+            WorkspaceRegistry workspaces = new WorkspaceRegistry(
+                    store, new WorkspaceResolver(config.dataDirectory()));
+            SessionRegistry sessions = new SessionRegistry(store, workspaces);
+            List<Tool> tools = List.of(
+                    new ListFilesTool(config.dataDirectory()),
+                    new ReadFileTool(config.dataDirectory()),
+                    new SearchTextTool(config.dataDirectory()),
+                    new WriteFileTool(config.dataDirectory()),
+                    new ReplaceInFileTool(config.dataDirectory()),
+                    new ExecuteCommandTool(config.dataDirectory(), new CommandRunner()));
+            SecretRedactor redactor = new SecretRedactor(config.apiKey());
+            ToolDispatcher dispatcher = new ToolDispatcher(new ToolRegistry(tools),
+                    redactor::redact, new ToolOutputTruncator());
+            AgentRunner runner = new AgentRunner(modelClientFactory.apply(config), dispatcher,
+                    objectMapper, config.model(), config.maxResponseCharacters(), store,
+                    new ContextManager(new TokenEstimator()), new TurnDigestFactory(),
+                    new com.yoda.codingagent.core.model.ModelRetryPolicy(),
+                    com.yoda.codingagent.core.model.RetryWaiter.cancellableSleep(),
+                    java.time.Clock.systemUTC(), redactor);
+            AgentService service = new DefaultAgentService(workspaces, sessions, runner,
+                    DefaultAgentService.DEFAULT_SYSTEM_PROMPT, redactor);
+            return new CliRuntime(service, store.startupRecoverySummary(), dataDirectoryLock);
+        } catch (RuntimeException exception) {
+            dataDirectoryLock.close();
+            throw exception;
+        }
     }
 
     private static WorkspaceDescriptor selectWorkspace(AgentService service, CliArguments cli) {
@@ -150,32 +166,46 @@ public final class CliApplication {
         return session;
     }
 
-    private static int interact(AgentService service, SessionDescriptor session,
-                                InputStream input, PrintWriter output,
+    private static int interact(AgentService service, WorkspaceDescriptor workspace,
+                                SessionDescriptor session, AgentConfig config,
+                                CliRuntime runtime, InputStream input, PrintWriter output,
                                 SecretRedactor redactor) {
         ConsoleRenderer renderer = new ConsoleRenderer(output, redactor::redact);
+        CliController controller = new CliController(service, config.defaultRunLimits(),
+                workspace, session, renderer, new ContextView(),
+                Executors.newThreadPerTaskExecutor(
+                        Thread.ofVirtual().name("coding-agent-turn-", 0).factory()));
+        renderer.recovery(runtime.startupRecoverySummary());
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(input, StandardCharsets.UTF_8))) {
+            renderer.prompt();
             while (true) {
-                output.print("coding-agent> ");
-                output.flush();
                 String line = reader.readLine();
-                if (line == null || line.equals("/exit")) {
-                    output.println();
-                    return 0;
-                }
-                if (line.equals("/help")) {
-                    output.println("/help  show commands\n/exit  exit the CLI");
+                renderer.commandRead();
+                if (line != null && line.isBlank()) {
+                    renderer.prompt();
                     continue;
                 }
-                if (line.isBlank()) {
-                    continue;
+                try {
+                    CliController.Outcome outcome = controller.handle(CliCommand.parse(line));
+                    if (outcome.exit()) {
+                        renderer.line("");
+                        return outcome.exitCode();
+                    }
+                    if (outcome.prompt()) {
+                        renderer.prompt();
+                    }
+                } catch (IllegalArgumentException exception) {
+                    renderer.error(exception.getMessage());
+                    renderer.prompt();
+                } catch (RuntimeException exception) {
+                    renderer.error(exception.getMessage() == null
+                            ? "Command failed unexpectedly." : exception.getMessage());
+                    renderer.prompt();
                 }
-                var result = service.runTurn(session.sessionId(), new AgentRequest(line),
-                        renderer::render, CancellationToken.NONE);
-                renderer.renderResult(result);
             }
         } catch (IOException exception) {
+            controller.handle(new CliCommand.Exit());
             throw new IllegalStateException("console input failed", exception);
         }
     }

@@ -24,6 +24,7 @@ public final class CanonicalHistory {
     private final List<Message> messages;
     private final Map<TurnId, TurnDigest> digests;
     private final List<TurnDigest> orderedDigests;
+    private final int totalCompletedTurnCount;
 
     public CanonicalHistory(SessionId sessionId, WorkspaceId workspaceId,
                             List<Message> messages) {
@@ -37,6 +38,12 @@ public final class CanonicalHistory {
 
     public CanonicalHistory(SessionId sessionId, WorkspaceId workspaceId,
                             List<Message> messages, List<TurnDigest> orderedDigests) {
+        this(sessionId, workspaceId, messages, orderedDigests, -1);
+    }
+
+    public CanonicalHistory(SessionId sessionId, WorkspaceId workspaceId,
+                            List<Message> messages, List<TurnDigest> orderedDigests,
+                            int totalCompletedTurnCount) {
         this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
         this.workspaceId = Objects.requireNonNull(workspaceId, "workspaceId");
         this.messages = List.copyOf(Objects.requireNonNull(messages, "messages"));
@@ -46,6 +53,13 @@ public final class CanonicalHistory {
         }
         this.systemMessage = system;
         this.completedTurns = groupAndValidate(this.messages);
+        int resolvedTotal = totalCompletedTurnCount < 0
+                ? this.completedTurns.size() : totalCompletedTurnCount;
+        if (resolvedTotal < this.completedTurns.size()) {
+            throw new IllegalArgumentException(
+                    "total completed turn count is smaller than loaded history");
+        }
+        this.totalCompletedTurnCount = resolvedTotal;
         this.orderedDigests = validateDigests(orderedDigests);
         Map<TurnId, TurnDigest> indexed = new LinkedHashMap<>();
         this.orderedDigests.forEach(digest -> indexed.put(digest.turnId(), digest));
@@ -78,6 +92,10 @@ public final class CanonicalHistory {
 
     public List<TurnDigest> orderedDigests() {
         return orderedDigests;
+    }
+
+    public int totalCompletedTurnCount() {
+        return totalCompletedTurnCount;
     }
 
     private static List<TurnDigest> validateDigests(List<TurnDigest> digests) {

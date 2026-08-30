@@ -16,6 +16,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 class ConsoleRendererTest {
@@ -65,8 +66,9 @@ class ConsoleRendererTest {
         renderer.render(new AgentEvent.TurnFailed(
                 workspace, session, turn, 2, now, ErrorCode.INTERNAL_ERROR,
                 "failure accidentally included " + key));
-        renderer.renderResult(AgentResult.failed(turn, TurnStatus.FAILED,
-                ErrorCode.INTERNAL_ERROR, "failure accidentally included " + key));
+        renderer.renderResult(AgentResult.failed(workspace, session, turn,
+                TurnStatus.FAILED, ErrorCode.INTERNAL_ERROR,
+                "failure accidentally included " + key, 1, 0, Duration.ofSeconds(1)));
 
         String output = bytes.toString(StandardCharsets.UTF_8);
         assertFalse(output.contains(key));

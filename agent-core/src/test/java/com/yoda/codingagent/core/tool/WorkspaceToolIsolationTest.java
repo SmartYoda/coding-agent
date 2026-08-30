@@ -17,12 +17,14 @@ import com.yoda.codingagent.core.api.TurnStatus;
 import com.yoda.codingagent.core.context.ContextManager;
 import com.yoda.codingagent.core.context.TokenEstimator;
 import com.yoda.codingagent.core.context.TurnDigestFactory;
+import com.yoda.codingagent.core.config.SecretRedactor;
 import com.yoda.codingagent.core.model.Message;
 import com.yoda.codingagent.core.model.ModelClient;
 import com.yoda.codingagent.core.model.ModelRequest;
 import com.yoda.codingagent.core.model.ModelStreamEvent;
 import com.yoda.codingagent.core.model.ModelStreamSink;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
+import com.yoda.codingagent.core.persistence.sqlite.DataDirectoryLock;
 import com.yoda.codingagent.core.tool.builtin.ExecuteCommandTool;
 import com.yoda.codingagent.core.tool.builtin.ReadFileTool;
 import com.yoda.codingagent.core.tool.process.CommandResult;
@@ -48,7 +50,8 @@ class WorkspaceToolIsolationTest {
         Path betaRoot = Files.createDirectory(temp.resolve("beta")).toRealPath();
         Files.writeString(alphaRoot.resolve("same.txt"), "alpha-only");
         Files.writeString(betaRoot.resolve("same.txt"), "beta-only");
-        SqliteStateStore store = SqliteStateStore.open(
+        DataDirectoryLock lock = DataDirectoryLock.acquire(state);
+        SqliteStateStore store = SqliteStateStore.open(lock,
                 state.resolve("agent.db"), Duration.ofSeconds(5));
         WorkspaceRegistry workspaces = new WorkspaceRegistry(
                 store, new WorkspaceResolver(state));
@@ -86,9 +89,11 @@ class WorkspaceToolIsolationTest {
                 new ToolDispatcher(new ToolRegistry(List.of(capturingRead, execute)),
                         value -> value, new ToolOutputTruncator()),
                 new ObjectMapper(), "test-model", 100_000, store,
-                new ContextManager(new TokenEstimator()), new TurnDigestFactory());
+                new ContextManager(new TokenEstimator()), new TurnDigestFactory(),
+                new SecretRedactor("test-key"));
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
-                DefaultAgentService.DEFAULT_SYSTEM_PROMPT);
+                DefaultAgentService.DEFAULT_SYSTEM_PROMPT,
+                new SecretRedactor("test-key"));
         RunLimits alphaLimits = limits(7, 4_096);
         RunLimits betaLimits = limits(11, 8_192);
         var alphaSession = service.openSession(

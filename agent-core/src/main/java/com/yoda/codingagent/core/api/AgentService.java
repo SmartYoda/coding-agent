@@ -17,6 +17,8 @@ public interface AgentService {
 
     SessionDescriptor getSession(SessionId sessionId);
 
+    SessionContextSummary getSessionContext(SessionId sessionId);
+
     void closeSession(SessionId sessionId);
 
     AgentResult runTurn(SessionId sessionId, AgentRequest request,

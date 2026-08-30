@@ -74,6 +74,9 @@ public final class ContextManager {
         int digestTokens = 0;
         List<TurnDigest> availableDigests = history.orderedDigests();
         for (int index = availableDigests.size() - 1; index >= 0; index--) {
+            if (selectedDigestsNewestFirst.size() >= 32) {
+                break;
+            }
             TurnDigest digest = availableDigests.get(index);
             if (fullTurnIds.contains(digest.turnId())) {
                 continue;
@@ -100,11 +103,25 @@ public final class ContextManager {
         ContextSnapshot.Budget budget = new ContextSnapshot.Budget(
                 fixedTokens, toolTokens, currentTokens, recentTokens, digestTokens,
                 policy.reservedOutputTokens(), policy.maxInputTokens());
-        boolean omittedFullTurn = selectedNewestFirst.size() < completed.size();
-        boolean hasDigestOnlyTurn = availableDigests.stream()
-                .anyMatch(digest -> !fullTurnIds.contains(digest.turnId()));
-        return new ContextSnapshot(snapshotMessages, budget,
-                omittedFullTurn || hasDigestOnlyTurn);
+        List<TurnId> selectedFullTurnIds = selectedNewestFirst.stream()
+                .map(CanonicalHistory.TurnHistory::turnId).toList();
+        List<TurnId> selectedDigestTurnIds = selectedDigestsNewestFirst.stream()
+                .map(Message.TurnDigestMessage::turnId).toList();
+        int representedTurns = Math.addExact(
+                selectedFullTurnIds.size(), selectedDigestTurnIds.size());
+        int omittedTurnCount = Math.max(0,
+                history.totalCompletedTurnCount() - representedTurns);
+        int selectedWithReserve = budget.totalWithReserve();
+        int loadedHistoryTokens = estimator.estimateMessages(
+                history.messages().subList(1, history.messages().size()));
+        int estimatedBefore = Math.max(selectedWithReserve,
+                Math.toIntExact(Math.min(Integer.MAX_VALUE,
+                        required + loadedHistoryTokens)));
+        ContextSnapshot.CompactionDecision decision =
+                new ContextSnapshot.CompactionDecision(selectedFullTurnIds,
+                        selectedDigestTurnIds, omittedTurnCount,
+                        estimatedBefore, selectedWithReserve);
+        return new ContextSnapshot(snapshotMessages, budget, decision);
     }
 
     private static List<Message> validateCurrentTurn(List<Message> currentTurn) {

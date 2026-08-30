@@ -29,6 +29,11 @@ import java.nio.file.Path;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -38,6 +43,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -145,6 +151,36 @@ class OpenAiCompatibleChatModelClientTest {
         assertEquals(ErrorCode.MODEL_AUTHENTICATION, exception.errorCode());
         assertFalse(exception.getMessage().contains(key));
         assertFalse(exception.getMessage().contains("provider response"));
+    }
+
+    @Test
+    void parsesAndCapsRetryAfterForRateLimitsAndServerFailures() throws Exception {
+        Instant now = Instant.parse("2026-08-30T06:00:00Z");
+        AtomicInteger requests = new AtomicInteger();
+        startServer(exchange -> {
+            int request = requests.getAndIncrement();
+            String retryAfter = request == 0 ? "120"
+                    : request == 1 ? DateTimeFormatter.RFC_1123_DATE_TIME.format(
+                            ZonedDateTime.ofInstant(now.plusSeconds(7), ZoneOffset.UTC)) : "11";
+            exchange.getResponseHeaders().set("Retry-After", retryAfter);
+            respond(exchange, request < 2 ? 429 : 503, "temporarily unavailable");
+        });
+        OpenAiCompatibleChatModelClient client = new OpenAiCompatibleChatModelClient(
+                config("test-secret"), HttpClient.newHttpClient(), objectMapper,
+                Clock.fixed(now, ZoneOffset.UTC));
+
+        AgentException capped = assertThrows(AgentException.class,
+                () -> client.stream(request(), ignored -> { }, CancellationToken.NONE));
+        AgentException dated = assertThrows(AgentException.class,
+                () -> client.stream(request(), ignored -> { }, CancellationToken.NONE));
+        AgentException unavailable = assertThrows(AgentException.class,
+                () -> client.stream(request(), ignored -> { }, CancellationToken.NONE));
+
+        assertEquals(ErrorCode.MODEL_RATE_LIMIT, capped.errorCode());
+        assertEquals(Duration.ofSeconds(30), capped.retryAfter());
+        assertEquals(Duration.ofSeconds(7), dated.retryAfter());
+        assertEquals(ErrorCode.MODEL_UNAVAILABLE, unavailable.errorCode());
+        assertEquals(Duration.ofSeconds(11), unavailable.retryAfter());
     }
 
     @Test

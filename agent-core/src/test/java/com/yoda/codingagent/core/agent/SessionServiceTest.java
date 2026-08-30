@@ -10,6 +10,7 @@ import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
 import com.yoda.codingagent.core.api.SessionId;
+import com.yoda.codingagent.core.api.SessionContextSummary;
 import com.yoda.codingagent.core.api.SessionStatus;
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.config.AgentConfig;
@@ -20,6 +21,7 @@ import com.yoda.codingagent.core.context.ContextManager;
 import com.yoda.codingagent.core.context.TokenEstimator;
 import com.yoda.codingagent.core.context.TurnDigestFactory;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
+import com.yoda.codingagent.core.persistence.sqlite.DataDirectoryLock;
 import com.yoda.codingagent.core.tool.ToolRegistry;
 import com.yoda.codingagent.core.tool.ToolDispatcher;
 import com.yoda.codingagent.core.tool.ToolOutputTruncator;
@@ -62,6 +64,7 @@ class SessionServiceTest {
         assertEquals(DefaultAgentService.DEFAULT_SYSTEM_PROMPT,
                 firstSystemPrompt(application.config().databasePath(), alphaOne.sessionId()));
 
+        application.dataDirectoryLock().close();
         TestApplication restarted = application(tempDirectory);
         try (SessionRegistry.Lease lease = restarted.sessions().acquire(alphaOne.sessionId())) {
             assertEquals(alpha.workspaceId(), lease.session().workspace().workspaceId());
@@ -131,11 +134,36 @@ class SessionServiceTest {
         assertEquals(ErrorCode.UNKNOWN_SESSION, unknown.errorCode());
     }
 
+    @Test
+    void contextSummaryIsAvailableForOpenAndClosedSessions(@TempDir Path tempDirectory)
+            throws IOException {
+        TestApplication application = application(tempDirectory);
+        WorkspaceDescriptor workspace = register(application, tempDirectory,
+                "Workspace", "workspace");
+        SessionDescriptor session = application.service().openSession(
+                new SessionConfig(workspace.workspaceId(), limits()));
+
+        SessionContextSummary open = application.service().getSessionContext(
+                session.sessionId());
+        assertEquals(session.sessionId(), open.sessionId());
+        assertEquals(workspace.workspaceId(), open.workspaceId());
+        assertEquals(limits(), open.runLimits());
+        assertEquals(0, open.completedTurnCount());
+        assertEquals(0, open.digestCount());
+
+        application.service().closeSession(session.sessionId());
+        assertEquals(open, application.service().getSessionContext(session.sessionId()));
+        AgentException unknown = assertThrows(AgentException.class,
+                () -> application.service().getSessionContext(SessionId.random()));
+        assertEquals(ErrorCode.UNKNOWN_SESSION, unknown.errorCode());
+    }
+
     private static TestApplication application(Path tempDirectory) {
         AgentConfig config = new AgentConfigLoader().load(Map.of(
                 "apiKey", "test-key",
                 "dataDirectory", tempDirectory.resolve("state").toString()), Map.of());
-        SqliteStateStore store = SqliteStateStore.open(
+        DataDirectoryLock lock = DataDirectoryLock.acquire(config.dataDirectory());
+        SqliteStateStore store = SqliteStateStore.open(lock,
                 config.databasePath(), config.databaseBusyTimeout());
         WorkspaceRegistry workspaces = new WorkspaceRegistry(store,
                 new WorkspaceResolver(config.dataDirectory()));
@@ -146,10 +174,12 @@ class SessionServiceTest {
                 new SecretRedactor(config.apiKey())::redact, new ToolOutputTruncator()),
                 new ObjectMapper(), config.model(),
                 config.maxResponseCharacters(), store,
-                new ContextManager(new TokenEstimator()), new TurnDigestFactory());
+                new ContextManager(new TokenEstimator()), new TurnDigestFactory(),
+                new SecretRedactor(config.apiKey()));
         AgentService service = new DefaultAgentService(workspaces, sessions, runner,
-                DefaultAgentService.DEFAULT_SYSTEM_PROMPT);
-        return new TestApplication(config, sessions, service);
+                DefaultAgentService.DEFAULT_SYSTEM_PROMPT,
+                new SecretRedactor(config.apiKey()));
+        return new TestApplication(config, lock, sessions, service);
     }
 
     private static WorkspaceDescriptor register(TestApplication application, Path parent,
@@ -207,6 +237,7 @@ class SessionServiceTest {
 
     private record TestApplication(
             AgentConfig config,
+            DataDirectoryLock dataDirectoryLock,
             SessionRegistry sessions,
             AgentService service
     ) { }

@@ -9,6 +9,8 @@ import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionStatus;
 import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.api.TurnStatus;
+import com.yoda.codingagent.core.api.SessionId;
+import com.yoda.codingagent.core.api.WorkspaceId;
 import com.yoda.codingagent.core.api.WorkspaceStatus;
 import com.yoda.codingagent.core.model.MessageKind;
 import com.yoda.codingagent.core.model.MessageRole;
@@ -40,18 +42,24 @@ class PersistenceContractTest {
     @Test
     void agentResultAcceptsOnlyTheFiveTerminalTurnStates() {
         TurnId turnId = TurnId.random();
+        WorkspaceId workspaceId = WorkspaceId.random();
+        SessionId sessionId = SessionId.random();
         for (TurnStatus status : TurnStatus.values()) {
             if (Set.of(TurnStatus.INTERRUPTED, TurnStatus.COMPLETED, TurnStatus.FAILED,
                     TurnStatus.CANCELLED, TurnStatus.LIMIT_REACHED).contains(status)) {
                 if (status == TurnStatus.COMPLETED) {
-                    AgentResult.completed(turnId, "done");
+                    AgentResult.completed(workspaceId, sessionId, turnId, "done",
+                            1, 0, Duration.ofSeconds(1));
                 } else {
-                    AgentResult.failed(turnId, status, ErrorCode.INTERNAL_ERROR, "failed");
+                    AgentResult.failed(workspaceId, sessionId, turnId, status,
+                            errorFor(status), "failed", 1, 0,
+                            Duration.ofSeconds(1));
                 }
             } else {
                 assertThrows(IllegalArgumentException.class,
-                        () -> new AgentResult(turnId, status, null,
-                                ErrorCode.INTERNAL_ERROR, "failed"));
+                        () -> new AgentResult(workspaceId, sessionId, turnId, status,
+                                null, ErrorCode.INTERNAL_ERROR, "failed", 1, 0,
+                                Duration.ofSeconds(1)));
             }
         }
     }
@@ -65,5 +73,14 @@ class PersistenceContractTest {
 
     private static Set<String> names(Enum<?>[] values) {
         return Arrays.stream(values).map(Enum::name).collect(Collectors.toUnmodifiableSet());
+    }
+
+    private static ErrorCode errorFor(TurnStatus status) {
+        return switch (status) {
+            case CANCELLED -> ErrorCode.CANCELLED;
+            case LIMIT_REACHED -> ErrorCode.TURN_LIMIT;
+            case FAILED, INTERRUPTED -> ErrorCode.INTERNAL_ERROR;
+            default -> throw new IllegalArgumentException("status is not unsuccessful terminal");
+        };
     }
 }

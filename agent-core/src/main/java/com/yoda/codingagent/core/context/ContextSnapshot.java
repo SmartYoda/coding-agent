@@ -1,13 +1,15 @@
 package com.yoda.codingagent.core.context;
 
 import com.yoda.codingagent.core.model.Message;
+import com.yoda.codingagent.core.api.TurnId;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 
 public record ContextSnapshot(
         List<Message> messages,
         Budget budget,
-        boolean compacted
+        CompactionDecision compactionDecision
 ) {
 
     public ContextSnapshot {
@@ -16,6 +18,46 @@ public record ContextSnapshot(
             throw new IllegalArgumentException("context snapshot must not be empty");
         }
         Objects.requireNonNull(budget, "budget");
+        Objects.requireNonNull(compactionDecision, "compactionDecision");
+    }
+
+    public boolean compacted() {
+        return compactionDecision.compacted();
+    }
+
+    public record CompactionDecision(
+            List<TurnId> fullTurnIds,
+            List<TurnId> digestTurnIds,
+            int omittedTurnCount,
+            int estimatedTokensBefore,
+            int estimatedTokensAfter
+    ) {
+        private static final int MAX_REPORTED_TURN_IDS = 32;
+
+        public CompactionDecision {
+            fullTurnIds = boundedDistinct(fullTurnIds, "fullTurnIds");
+            digestTurnIds = boundedDistinct(digestTurnIds, "digestTurnIds");
+            HashSet<TurnId> overlap = new HashSet<>(fullTurnIds);
+            overlap.retainAll(digestTurnIds);
+            if (!overlap.isEmpty() || omittedTurnCount < 0
+                    || estimatedTokensBefore < 0 || estimatedTokensAfter < 0
+                    || estimatedTokensAfter > estimatedTokensBefore) {
+                throw new IllegalArgumentException("invalid compaction decision");
+            }
+        }
+
+        public boolean compacted() {
+            return omittedTurnCount > 0 || !digestTurnIds.isEmpty();
+        }
+
+        private static List<TurnId> boundedDistinct(List<TurnId> ids, String name) {
+            List<TurnId> copied = List.copyOf(Objects.requireNonNull(ids, name));
+            if (copied.size() > MAX_REPORTED_TURN_IDS
+                    || new HashSet<>(copied).size() != copied.size()) {
+                throw new IllegalArgumentException(name + " must contain at most 32 unique ids");
+            }
+            return copied;
+        }
     }
 
     public record Budget(

@@ -41,4 +41,5 @@ workspaces/
 # Non-project documents and local research/rendering artifacts
 /doc/
 /tmp/
+**/tmp/
 /DEVELOPMENT.md

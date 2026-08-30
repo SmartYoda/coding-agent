@@ -30,6 +30,7 @@ import com.yoda.codingagent.core.model.ModelRequest;
 import com.yoda.codingagent.core.model.ModelResponse;
 import com.yoda.codingagent.core.model.ModelResponseAccumulator;
 import com.yoda.codingagent.core.persistence.sqlite.SqliteStateStore;
+import com.yoda.codingagent.core.persistence.sqlite.DataDirectoryLock;
 import com.yoda.codingagent.core.tool.ToolDefinition;
 import com.yoda.codingagent.core.tool.Tool;
 import com.yoda.codingagent.core.tool.ToolArguments;
@@ -121,7 +122,8 @@ class QwenLiveSmokeTest {
                         "<project><artifactId>coding-agent-parent</artifactId></project>");
             }
         };
-        SqliteStateStore store = SqliteStateStore.open(
+        DataDirectoryLock lock = DataDirectoryLock.acquire(config.dataDirectory());
+        SqliteStateStore store = SqliteStateStore.open(lock,
                 config.databasePath(), config.databaseBusyTimeout());
         Path root = Files.createDirectory(tempDirectory.resolve("workspace"));
         WorkspaceRegistry workspaces = new WorkspaceRegistry(store,
@@ -134,9 +136,11 @@ class QwenLiveSmokeTest {
                         new SecretRedactor(config.apiKey())::redact, new ToolOutputTruncator()),
                 objectMapper, config.model(),
                 config.maxResponseCharacters(), store,
-                new ContextManager(new TokenEstimator()), new TurnDigestFactory());
+                new ContextManager(new TokenEstimator()), new TurnDigestFactory(),
+                new SecretRedactor(config.apiKey()));
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
-                DefaultAgentService.DEFAULT_SYSTEM_PROMPT);
+                DefaultAgentService.DEFAULT_SYSTEM_PROMPT,
+                new SecretRedactor(config.apiKey()));
         var session = service.openSession(new SessionConfig(workspace.workspaceId(),
                 new RunLimits(4, Duration.ofMinutes(2), config.modelTimeout(),
                         Duration.ofSeconds(10), 16_384, 8_192, 512, 2)));

@@ -13,6 +13,7 @@ import com.yoda.codingagent.core.tool.ToolResult;
 import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
+import com.yoda.codingagent.core.api.SessionContextSummary;
 import com.yoda.codingagent.core.api.SessionId;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -35,13 +36,15 @@ public interface StateStore {
 
     StoredSession loadSession(SessionId sessionId);
 
+    SessionContextSummary loadSessionContextSummary(SessionId sessionId);
+
     void closeSession(SessionId sessionId);
 
     CanonicalHistory loadCanonicalHistory(SessionId sessionId);
 
     void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt, String userInput);
 
-    void markTurnStreaming(TurnId turnId);
+    void markTurnStreaming(TurnId turnId, int stepNo);
 
     StagedModelStep stageToolStep(TurnId turnId, int stepNo, ModelResponse response,
                                   int contextEstimatedTokens);
@@ -53,9 +56,9 @@ public interface StateStore {
     void commitToolStep(StagedModelStep step);
 
     void completeTurn(TurnId turnId, int stepNo, ModelResponse response,
-                      int contextEstimatedTokens, TurnDigest digest);
+                      int contextEstimatedTokens, TurnDigest digest, Instant finishedAt);
 
-    void failTurn(TurnId turnId, TurnStatus status, ErrorCode reason);
+    void failTurn(TurnId turnId, TurnStatus status, ErrorCode reason, Instant finishedAt);
 
     RecoverySummary recoverInterruptedTurns();
 

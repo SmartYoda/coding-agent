@@ -3,6 +3,7 @@ package com.yoda.codingagent.core.agent;
 import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
+import com.yoda.codingagent.core.api.SessionContextSummary;
 import com.yoda.codingagent.core.api.SessionId;
 import com.yoda.codingagent.core.api.SessionStatus;
 import com.yoda.codingagent.core.api.WorkspaceId;
@@ -38,6 +39,10 @@ public final class SessionRegistry {
 
     public SessionDescriptor get(SessionId sessionId) {
         return stateStore.loadSession(sessionId).descriptor();
+    }
+
+    public SessionContextSummary contextSummary(SessionId sessionId) {
+        return stateStore.loadSessionContextSummary(sessionId);
     }
 
     public synchronized void close(SessionId sessionId) {

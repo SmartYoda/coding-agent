@@ -3,6 +3,7 @@ package com.yoda.codingagent.core.agent;
 import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
+import com.yoda.codingagent.core.api.SessionContextSummary;
 import com.yoda.codingagent.core.api.SessionId;
 import com.yoda.codingagent.core.api.TurnStatus;
 import com.yoda.codingagent.core.api.TurnId;
@@ -21,7 +22,16 @@ import java.util.List;
 
 final class FailingStateStore implements StateStore {
 
-    enum FailurePoint { BEGIN_TURN, STAGE_TOOL_STEP, RECORD_TOOL_RESULT, FAIL_TURN }
+    enum FailurePoint {
+        BEGIN_TURN,
+        MARK_TURN_STREAMING,
+        STAGE_TOOL_STEP,
+        MARK_TOOL_EXECUTING,
+        RECORD_TOOL_RESULT,
+        COMMIT_TOOL_STEP,
+        COMPLETE_TURN,
+        FAIL_TURN
+    }
 
     private final StateStore delegate;
     private final FailurePoint failurePoint;
@@ -66,6 +76,11 @@ final class FailingStateStore implements StateStore {
     }
 
     @Override
+    public SessionContextSummary loadSessionContextSummary(SessionId sessionId) {
+        return delegate.loadSessionContextSummary(sessionId);
+    }
+
+    @Override
     public void closeSession(SessionId sessionId) { delegate.closeSession(sessionId); }
 
     @Override
@@ -81,7 +96,10 @@ final class FailingStateStore implements StateStore {
     }
 
     @Override
-    public void markTurnStreaming(TurnId turnId) { delegate.markTurnStreaming(turnId); }
+    public void markTurnStreaming(TurnId turnId, int stepNo) {
+        failAt(FailurePoint.MARK_TURN_STREAMING);
+        delegate.markTurnStreaming(turnId, stepNo);
+    }
 
     @Override
     public StagedModelStep stageToolStep(TurnId turnId, int stepNo, ModelResponse response,
@@ -92,6 +110,7 @@ final class FailingStateStore implements StateStore {
 
     @Override
     public void markToolExecuting(StagedModelStep step, ToolCall call) {
+        failAt(FailurePoint.MARK_TOOL_EXECUTING);
         delegate.markToolExecuting(step, call);
     }
 
@@ -102,18 +121,25 @@ final class FailingStateStore implements StateStore {
     }
 
     @Override
-    public void commitToolStep(StagedModelStep step) { delegate.commitToolStep(step); }
-
-    @Override
-    public void completeTurn(TurnId turnId, int stepNo, ModelResponse response,
-                             int contextEstimatedTokens, TurnDigest digest) {
-        delegate.completeTurn(turnId, stepNo, response, contextEstimatedTokens, digest);
+    public void commitToolStep(StagedModelStep step) {
+        failAt(FailurePoint.COMMIT_TOOL_STEP);
+        delegate.commitToolStep(step);
     }
 
     @Override
-    public void failTurn(TurnId turnId, TurnStatus status, ErrorCode reason) {
+    public void completeTurn(TurnId turnId, int stepNo, ModelResponse response,
+                             int contextEstimatedTokens, TurnDigest digest,
+                             Instant finishedAt) {
+        failAt(FailurePoint.COMPLETE_TURN);
+        delegate.completeTurn(turnId, stepNo, response, contextEstimatedTokens, digest,
+                finishedAt);
+    }
+
+    @Override
+    public void failTurn(TurnId turnId, TurnStatus status, ErrorCode reason,
+                         Instant finishedAt) {
         failAt(FailurePoint.FAIL_TURN);
-        delegate.failTurn(turnId, status, reason);
+        delegate.failTurn(turnId, status, reason, finishedAt);
     }
 
     @Override

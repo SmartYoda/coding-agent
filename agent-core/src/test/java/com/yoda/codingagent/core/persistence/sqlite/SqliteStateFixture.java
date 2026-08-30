@@ -234,6 +234,31 @@ public final class SqliteStateFixture {
         }
     }
 
+    void insertBareRecoverableTurn(SessionId sessionId, TurnId turnId, String status)
+            throws Exception {
+        if (!List.of("RUNNING", "STREAMING_MODEL").contains(status)) {
+            throw new IllegalArgumentException("unsupported bare recovery status");
+        }
+        try (Connection connection = openConnection()) {
+            long now = Instant.now().toEpochMilli();
+            int turnNo = nextInt(connection,
+                    "SELECT COALESCE(MAX(turn_no), 0) + 1 FROM turns WHERE session_id = ?",
+                    sessionId.value().toString());
+            execute(connection, """
+                    INSERT INTO turns
+                        (id, session_id, turn_no, status, termination_reason,
+                         created_at, updated_at, finished_at)
+                    VALUES (?, ?, ?, ?, NULL, ?, ?, NULL)
+                    """, turnId.value().toString(), sessionId.value().toString(), turnNo,
+                    status, now, now);
+            int sequence = nextInt(connection,
+                    "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM messages WHERE session_id = ?",
+                    sessionId.value().toString());
+            insertMessage(connection, sessionId, turnId, null, null, sequence,
+                    "USER", "USER_TEXT", "recover bare turn", now);
+        }
+    }
+
     public RecoveryState readRecoveryState(TurnId turnId) throws Exception {
         try (Connection connection = openConnection()) {
             String turnStatus = queryText(connection,
