@@ -76,7 +76,11 @@ class CliApplicationIntegrationTest {
         int exit = new CliApplication(ignored -> scripted).run(new String[]{
                         "--workspace", "fixture=" + workspace,
                         "--data-dir", state.toString()}, Map.of("LLM_API_KEY", "offline-key"),
-                inputAfter(() -> step.get() == 5, "fix it\n/exit\n"),
+                // The fifth model request starts before the runner commits the final step.
+                // Wait for the prompt restored after the turn so /exit cannot cancel that commit.
+                inputAfter(() -> countOccurrences(
+                        output.toString(StandardCharsets.UTF_8), "coding-agent> ") >= 2,
+                        "fix it\n/exit\n"),
                 output, error);
 
         assertEquals(0, exit, error.toString(StandardCharsets.UTF_8));
@@ -283,6 +287,16 @@ class CliApplicationIntegrationTest {
 
     private static ByteArrayInputStream input(String value) {
         return new ByteArrayInputStream(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static int countOccurrences(String value, String target) {
+        int count = 0;
+        int offset = 0;
+        while ((offset = value.indexOf(target, offset)) >= 0) {
+            count++;
+            offset += target.length();
+        }
+        return count;
     }
 
     private static java.io.InputStream inputAfter(BooleanSupplier ready, String value) {
