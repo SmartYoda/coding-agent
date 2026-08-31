@@ -12,13 +12,14 @@ import org.junit.jupiter.api.Test;
 class CliArgumentsTest {
 
     @Test
-    void parsesEveryDayThreeFlagExactlyOnce() {
+    void parsesEverySupportedFlagExactlyOnce() {
         UUID session = UUID.randomUUID();
         CliArguments arguments = CliArguments.parse(new String[]{
                 "--workspace", "main=/tmp/a=b",
                 "--session", session.toString(),
                 "--base-url", "http://127.0.0.1:8080/v1",
                 "--model", "test-model",
+                "--enable-thinking", "true",
                 "--data-dir", "/tmp/state",
                 "--max-steps", "7",
                 "--turn-timeout-seconds", "60",
@@ -32,6 +33,7 @@ class CliArgumentsTest {
         assertEquals("main", arguments.workspaceName());
         assertEquals(Path.of("/tmp/a=b"), arguments.workspacePath());
         assertEquals(session, arguments.sessionId().value());
+        assertEquals("true", arguments.configOverrides().get("enableThinking"));
         assertEquals("7", arguments.configOverrides().get("maxSteps"));
         assertEquals("3", arguments.configOverrides().get("recentFullTurns"));
     }
@@ -52,6 +54,8 @@ class CliArgumentsTest {
                 () -> CliArguments.parse(new String[]{"--model", "a", "--model", "b"}));
         assertThrows(IllegalArgumentException.class,
                 () -> CliArguments.parse(new String[]{"--model"}));
+        assertThrows(IllegalArgumentException.class,
+                () -> CliArguments.parse(new String[]{"--enable-thinking"}));
         assertThrows(IllegalArgumentException.class,
                 () -> CliArguments.parse(new String[]{"--workspace", "missing-separator"}));
         assertThrows(IllegalArgumentException.class,

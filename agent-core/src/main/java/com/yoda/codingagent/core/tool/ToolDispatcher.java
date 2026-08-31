@@ -16,12 +16,13 @@ public final class ToolDispatcher {
     private final ToolRegistry registry;
     private static final Map<String, Set<String>> METADATA_KEYS = Map.of(
             "list_files", Set.of("path", "entries"),
-            "read_file", Set.of("path", "startLine", "endLine"),
+            "read_file", Set.of("path", "startLine", "endLine",
+                    "utf8Bytes", "endsWithNewline"),
             "search_text", Set.of("path", "matches", "scannedFiles"),
             "write_file", Set.of("path", "bytesWritten", "created", "overwritten"),
             "replace_in_file", Set.of("path", "occurrences", "bytesWritten"),
             "execute_command", Set.of("exitCode", "timedOut", "cancelled",
-                    "outputBytesTruncated"));
+                    "outputBytesTruncated", "policyDecision"));
 
     private final UnaryOperator<String> redactor;
     private final ToolOutputTruncator truncator;

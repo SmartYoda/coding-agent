@@ -173,7 +173,20 @@ class CommandExecutionTest {
                 context(workspace, "no"));
         assertEquals(ToolStatus.DENIED, denied.status());
         assertEquals(ErrorCode.COMMAND_DENIED, denied.errorCode());
+        assertEquals("DENY", denied.metadata().get("policyDecision"));
+        assertTrue(denied.output().contains("do not retry"));
         assertFalse(denied.metadata().containsKey("exitCode"));
+
+        var approvalArguments = mapper.createObjectNode();
+        approvalArguments.putArray("argv").add("curl").add("https://example.com");
+        ToolResult approvalRequired = dispatcher.dispatch(new ToolCall(
+                "approval", "execute_command", approvalArguments),
+                context(workspace, "approval"));
+        assertEquals(ToolStatus.DENIED, approvalRequired.status());
+        assertEquals("REQUIRE_APPROVAL",
+                approvalRequired.metadata().get("policyDecision"));
+        assertTrue(approvalRequired.output().contains("current runtime"));
+        assertTrue(approvalRequired.output().contains("do not retry"));
 
         var cancelledArguments = mapper.createObjectNode();
         cancelledArguments.putArray("argv").add("git").add("status").add("--short");

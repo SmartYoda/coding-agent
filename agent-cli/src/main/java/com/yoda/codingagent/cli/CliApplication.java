@@ -216,6 +216,7 @@ public final class CliApplication {
         output.println("  --session <uuid>              Resume an OPEN session");
         output.println("  --base-url <url>              OpenAI-compatible API base URL");
         output.println("  --model <name>                Model name");
+        output.println("  --enable-thinking <true|false> Enable model thinking mode");
         output.println("  --data-dir <path>             Agent state directory");
         output.println("  --max-steps <n>               Maximum model steps per turn");
         output.println("  --turn-timeout-seconds <n>    Turn timeout");

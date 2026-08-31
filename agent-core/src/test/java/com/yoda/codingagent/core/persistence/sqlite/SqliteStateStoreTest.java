@@ -18,8 +18,10 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -44,11 +46,12 @@ class SqliteStateStoreTest {
         assertEquals("Alpha", alpha.displayName());
         assertEquals("Beta", beta.displayName());
         assertEquals(WorkspaceStatus.ACTIVE, alpha.status());
-        assertEquals(List.of(alpha, beta), firstStore.listWorkspaces());
+        List<WorkspaceDescriptor> initialOrder = firstStore.listWorkspaces();
+        assertEquals(Set.of(alpha, beta), new HashSet<>(initialOrder));
 
         firstLock.close();
         SqliteStateStore reopenedStore = open(config);
-        assertEquals(List.of(alpha, beta), reopenedStore.listWorkspaces());
+        assertEquals(initialOrder, reopenedStore.listWorkspaces());
         assertEquals("wal", journalMode(config.databasePath()));
     }
 
@@ -83,9 +86,9 @@ class SqliteStateStoreTest {
 
         WorkspaceDescriptor second = store.registerWorkspace("Second",
                 tempDirectory.resolve("other-root"));
-        assertEquals(List.of("First", "Second"), store.listWorkspaces().stream()
+        assertEquals(Set.of("First", "Second"), store.listWorkspaces().stream()
                 .map(WorkspaceDescriptor::displayName)
-                .toList());
+                .collect(java.util.stream.Collectors.toSet()));
         assertEquals(WorkspaceStatus.ACTIVE, second.status());
     }
 

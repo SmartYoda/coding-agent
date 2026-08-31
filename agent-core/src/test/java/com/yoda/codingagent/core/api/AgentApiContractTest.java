@@ -89,6 +89,20 @@ class AgentApiContractTest {
     }
 
     @Test
+    void textDeltaAcceptsWhitespaceFragmentsButRejectsEmptyText() {
+        Instant now = Instant.now();
+
+        assertEquals("\n", new AgentEvent.ModelTextDelta(
+                workspaceId, sessionId, turnId, 1, now, "\n").text());
+        assertEquals(" ", new AgentEvent.ModelTextDelta(
+                workspaceId, sessionId, turnId, 2, now, " ").text());
+        assertThrows(IllegalArgumentException.class, () -> new AgentEvent.ModelTextDelta(
+                workspaceId, sessionId, turnId, 3, now, ""));
+        assertThrows(NullPointerException.class, () -> new AgentEvent.ModelTextDelta(
+                workspaceId, sessionId, turnId, 4, now, null));
+    }
+
+    @Test
     void contextBudgetAndSummaryRejectContradictoryCounts() {
         Instant now = Instant.now();
         assertThrows(IllegalArgumentException.class,

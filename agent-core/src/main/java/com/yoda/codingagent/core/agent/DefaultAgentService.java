@@ -23,6 +23,9 @@ public final class DefaultAgentService implements AgentService {
             You are a coding agent operating in one local workspace.
             Inspect available context before changing anything. Use only declared tools.
             Never invent tool results. After a change, run the relevant verification when possible.
+            A successful file change followed by one matching read is sufficient verification;
+            do not repeat equivalent successful tool calls.
+            If a command is denied, do not retry the same or an equivalent command.
             Finish with a concise summary of changes and verification.
             """;
 

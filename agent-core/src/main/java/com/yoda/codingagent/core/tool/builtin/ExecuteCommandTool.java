@@ -49,8 +49,14 @@ public final class ExecuteCommandTool implements Tool {
         CommandDecision decision = new CommandPolicy(
                 context.workspaceRoot(), protectedDataDirectory).evaluate(argv, cwd);
         if (decision != CommandDecision.ALLOW) {
-            return new ToolResult(ToolStatus.DENIED, "Command denied by policy",
-                    ErrorCode.COMMAND_DENIED, false, Duration.ZERO, Map.of());
+            String output = decision == CommandDecision.REQUIRE_APPROVAL
+                    ? "Command requires approval, but the current runtime has no approval channel; "
+                    + "do not retry the same or an equivalent command."
+                    : "Command is prohibited by policy; do not retry the same or an "
+                    + "equivalent command.";
+            return new ToolResult(ToolStatus.DENIED, output,
+                    ErrorCode.COMMAND_DENIED, false, Duration.ZERO,
+                    Map.of("policyDecision", decision.name()));
         }
         if (context.cancellationToken().isCancelled()) {
             return new ToolResult(ToolStatus.CANCELLED, fixedOutput("", ""),

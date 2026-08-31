@@ -43,7 +43,10 @@ public sealed interface AgentEvent permits AgentEvent.TurnStarted,
                           long sequence, Instant timestamp, String text) implements AgentEvent {
         public ModelTextDelta {
             validate(workspaceId, sessionId, turnId, sequence, timestamp);
-            requireText(text, "text");
+            Objects.requireNonNull(text, "text");
+            if (text.isEmpty()) {
+                throw new IllegalArgumentException("text must not be empty");
+            }
         }
     }
 

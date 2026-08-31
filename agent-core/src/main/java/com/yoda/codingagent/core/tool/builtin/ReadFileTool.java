@@ -36,7 +36,8 @@ public final class ReadFileTool implements Tool {
         if (content.isEmpty()) {
             return ToolResult.success("", false, Map.of(
                     "path", requestedPath, "startLine", Integer.toString(startLine),
-                    "endLine", Integer.toString(startLine - 1)));
+                    "endLine", Integer.toString(startLine - 1),
+                    "utf8Bytes", "0", "endsWithNewline", "false"));
         }
         String[] lines = content.split("\\R", -1);
         if (startLine > lines.length) {
@@ -69,7 +70,9 @@ public final class ReadFileTool implements Tool {
         return ToolResult.success(output.toString(), truncated, Map.of(
                 "path", requestedPath,
                 "startLine", Integer.toString(startLine),
-                "endLine", Integer.toString(endLine)));
+                "endLine", Integer.toString(endLine),
+                "utf8Bytes", Integer.toString(FileToolSupport.utf8Length(content)),
+                "endsWithNewline", Boolean.toString(content.endsWith("\n"))));
     }
 
     private static ToolDefinition buildDefinition() {

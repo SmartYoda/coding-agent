@@ -95,6 +95,27 @@ class OpenAiCompatibleChatModelClientTest {
     }
 
     @Test
+    void sendsEnabledThinkingModeToCompatibleApi() throws Exception {
+        AtomicReference<JsonNode> capturedBody = new AtomicReference<>();
+        startServer(exchange -> {
+            capturedBody.set(objectMapper.readTree(exchange.getRequestBody()));
+            respond(exchange, 200, """
+                    data: {"id":"resp-thinking","choices":[{"delta":{"content":"完成"},"finish_reason":"stop"}]}
+
+                    data: [DONE]
+
+                    """);
+        });
+        OpenAiCompatibleChatModelClient client = new OpenAiCompatibleChatModelClient(
+                config("test-secret", true), HttpClient.newHttpClient(), objectMapper);
+
+        client.stream(request(), new ModelResponseAccumulator(objectMapper, 4096),
+                CancellationToken.NONE);
+
+        assertTrue(capturedBody.get().get("enable_thinking").asBoolean());
+    }
+
+    @Test
     void encodesDigestAsLowPriorityHistoryAndPreservesStructuredToolResult()
             throws Exception {
         AtomicReference<JsonNode> capturedBody = new AtomicReference<>();
@@ -265,9 +286,13 @@ class OpenAiCompatibleChatModelClientTest {
     }
 
     private AgentConfig config(String key) {
+        return config(key, false);
+    }
+
+    private AgentConfig config(String key, boolean thinkingEnabled) {
         return new AgentConfig(URI.create("http://127.0.0.1:" + server.getAddress().getPort()
                 + "/compatible-mode/v1"), key, "qwen3.8-flash", Duration.ofSeconds(10),
-                4096, 4096, false,
+                4096, 4096, thinkingEnabled,
                 Path.of(System.getProperty("java.io.tmpdir"), "coding-agent-model-test"),
                 Duration.ofSeconds(5));
     }

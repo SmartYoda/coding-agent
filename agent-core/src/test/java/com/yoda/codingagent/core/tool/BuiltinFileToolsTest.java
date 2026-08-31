@@ -54,6 +54,10 @@ class BuiltinFileToolsTest {
                 object().put("path", "src/A.java").put("startLine", 2).put("maxLines", 1));
         assertEquals("2:   // needle", read.output());
         assertTrue(read.truncated());
+        assertEquals("true", read.metadata().get("endsWithNewline"));
+        assertEquals(Integer.toString("class A {\n  // needle\n}\n"
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8).length),
+                read.metadata().get("utf8Bytes"));
 
         ToolResult searched = dispatch(new SearchTextTool(state), context,
                 object().put("query", "needle").put("path", ".").put("limit", 10));

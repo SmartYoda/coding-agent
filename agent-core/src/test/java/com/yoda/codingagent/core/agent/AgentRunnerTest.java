@@ -103,6 +103,34 @@ class AgentRunnerTest {
     }
 
     @Test
+    void preservesWhitespaceOnlyStreamDeltasAndCompletesTurn(@TempDir Path tempDirectory)
+            throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(
+                new ModelStreamEvent.ResponseStarted("one"),
+                new ModelStreamEvent.TextDelta("修改完成"),
+                new ModelStreamEvent.TextDelta("\n"),
+                new ModelStreamEvent.TextDelta("已验证"),
+                new ModelStreamEvent.ResponseFinished("stop"),
+                new ModelStreamEvent.StreamEnded())));
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of()));
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("完成任务"), events::add, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertEquals("修改完成\n已验证", result.finalText());
+        String streamed = events.stream().filter(AgentEvent.ModelTextDelta.class::isInstance)
+                .map(AgentEvent.ModelTextDelta.class::cast)
+                .map(AgentEvent.ModelTextDelta::text)
+                .collect(java.util.stream.Collectors.joining());
+        assertEquals(result.finalText(), streamed);
+        assertEquals(1, application.store().loadCanonicalHistory(
+                application.session().sessionId()).completedTurns().size());
+    }
+
+    @Test
     void incompleteToolCallNeverExecutesOrEntersCanonicalHistory(
             @TempDir Path tempDirectory) throws Exception {
         ScriptedModelClient model = new ScriptedModelClient(List.of(List.of(

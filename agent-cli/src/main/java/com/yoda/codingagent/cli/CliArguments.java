@@ -17,6 +17,7 @@ public record CliArguments(
     private static final Map<String, String> CONFIG_FLAGS = Map.ofEntries(
             Map.entry("--base-url", "baseUrl"),
             Map.entry("--model", "model"),
+            Map.entry("--enable-thinking", "enableThinking"),
             Map.entry("--data-dir", "dataDirectory"),
             Map.entry("--max-steps", "maxSteps"),
             Map.entry("--turn-timeout-seconds", "turnTimeoutSeconds"),

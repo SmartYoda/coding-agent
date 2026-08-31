@@ -24,11 +24,47 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class CliApplicationIntegrationTest {
+
+    @Test
+    void cliThinkingFlagOverridesEnvironmentInBothDirections(@TempDir Path temp)
+            throws Exception {
+        Path workspace = Files.createDirectory(temp.resolve("workspace"));
+        Path state = temp.resolve("state");
+        Path disabledState = temp.resolve("disabled-state");
+        AtomicReference<AgentConfig> capturedConfig = new AtomicReference<>();
+        CliApplication application = new CliApplication(config -> {
+            capturedConfig.set(config);
+            return (request, sink, token) -> {
+                throw new AssertionError("model must not be called");
+            };
+        });
+
+        int exit = application.run(new String[]{
+                        "--workspace", "main=" + workspace,
+                        "--data-dir", state.toString(),
+                        "--enable-thinking", "true"},
+                Map.of("LLM_API_KEY", "offline-key", "LLM_ENABLE_THINKING", "false"),
+                input("/exit\n"), new ByteArrayOutputStream(), new ByteArrayOutputStream());
+
+        assertEquals(0, exit);
+        assertTrue(capturedConfig.get().thinkingEnabled());
+
+        int disabledExit = application.run(new String[]{
+                        "--workspace", "main=" + workspace,
+                        "--data-dir", disabledState.toString(),
+                        "--enable-thinking", "false"},
+                Map.of("LLM_API_KEY", "offline-key", "LLM_ENABLE_THINKING", "true"),
+                input("/exit\n"), new ByteArrayOutputStream(), new ByteArrayOutputStream());
+
+        assertEquals(0, disabledExit);
+        assertFalse(capturedConfig.get().thinkingEnabled());
+    }
 
     @Test
     void completesOfflineReadModifyTestLoopAndPersistsDigest(@TempDir Path temp)
