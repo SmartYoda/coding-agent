@@ -48,6 +48,9 @@
                         <manifest>
                             <mainClass>com.yoda.codingagent.cli.Main</mainClass>
                         </manifest>
+                        <manifestEntries>
+                            <Enable-Native-Access>ALL-UNNAMED</Enable-Native-Access>
+                        </manifestEntries>
                     </archive>
                 </configuration>
             </plugin>

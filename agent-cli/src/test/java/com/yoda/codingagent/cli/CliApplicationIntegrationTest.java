@@ -225,10 +225,13 @@ class CliApplicationIntegrationTest {
         CliApplication application = new CliApplication(ignored -> finalModel);
         String[] baseArguments = {"--workspace", "main=" + workspace,
                 "--data-dir", state.toString()};
+        ByteArrayOutputStream firstOutput = new ByteArrayOutputStream();
 
         assertEquals(0, application.run(baseArguments, environment,
-                inputAfter(() -> completedRequests.get() >= 1, "first\n/exit\n"),
-                new ByteArrayOutputStream(),
+                inputAfter(() -> countOccurrences(
+                        firstOutput.toString(StandardCharsets.UTF_8), "coding-agent> ") >= 2,
+                        "first\n/exit\n"),
+                firstOutput,
                 new ByteArrayOutputStream()));
         AgentConfig config = new AgentConfigLoader().load(
                 Map.of("dataDirectory", state.toString()), environment);
@@ -238,12 +241,15 @@ class CliApplicationIntegrationTest {
         var registered = store.listWorkspaces();
         var session = store.listSessions(registered.getFirst().workspaceId()).getFirst();
         lock.close();
+        ByteArrayOutputStream secondOutput = new ByteArrayOutputStream();
 
         assertEquals(0, application.run(new String[]{"--workspace", "main=" + workspace,
                         "--data-dir", state.toString(), "--session",
                 session.sessionId().value().toString()}, environment,
-                inputAfter(() -> completedRequests.get() >= 2, "second\n/exit\n"),
-                new ByteArrayOutputStream(),
+                inputAfter(() -> countOccurrences(
+                        secondOutput.toString(StandardCharsets.UTF_8), "coding-agent> ") >= 2,
+                        "second\n/exit\n"),
+                secondOutput,
                 new ByteArrayOutputStream()));
         assertEquals(2, store.loadCanonicalHistory(session.sessionId()).completedTurns().size());
 
@@ -286,6 +292,56 @@ class CliApplicationIntegrationTest {
         assertTrue(help.contains("Usage:"));
         assertTrue(help.contains("Default thinking mode per turn"));
         assertTrue(help.contains("Context input budget (default: 131072)"));
+    }
+
+    @Test
+    void explicitColorModeStylesInteractiveOutputEvenWhenCaptured(@TempDir Path temp)
+            throws Exception {
+        Path workspace = Files.createDirectory(temp.resolve("workspace"));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        int exit = new CliApplication(ignored -> (request, sink, token) -> {
+            throw new AssertionError("model must not be called");
+        }).run(new String[]{"--workspace", "main=" + workspace,
+                        "--data-dir", temp.resolve("state").toString()},
+                Map.of("LLM_API_KEY", "offline-key",
+                        "CODING_AGENT_COLOR", "always"),
+                input("/exit\n"), output, new ByteArrayOutputStream());
+
+        assertEquals(0, exit);
+        String rendered = output.toString(StandardCharsets.UTF_8);
+        assertTrue(rendered.contains("\u001B[1;36mcoding-agent> \u001B[0m"));
+    }
+
+    @Test
+    void noColorOverridesForcedColorForCapturedOutput(@TempDir Path temp)
+            throws Exception {
+        Path workspace = Files.createDirectory(temp.resolve("workspace"));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        int exit = new CliApplication(ignored -> (request, sink, token) -> {
+            throw new AssertionError("model must not be called");
+        }).run(new String[]{"--workspace", "main=" + workspace,
+                        "--data-dir", temp.resolve("state").toString()},
+                Map.of("LLM_API_KEY", "offline-key",
+                        "CODING_AGENT_COLOR", "always", "NO_COLOR", "1"),
+                input("/exit\n"), output, new ByteArrayOutputStream());
+
+        assertEquals(0, exit);
+        String rendered = output.toString(StandardCharsets.UTF_8);
+        assertTrue(rendered.contains("coding-agent> "));
+        assertFalse(rendered.contains("\u001B"));
+    }
+
+    @Test
+    void invalidColorModeFailsBeforeCoreComposition() {
+        ByteArrayOutputStream error = new ByteArrayOutputStream();
+        int exit = new CliApplication(config -> {
+            throw new AssertionError("model client must not be created");
+        }).run(new String[]{}, Map.of("CODING_AGENT_COLOR", "sometimes"),
+                InputStreamHolder.EMPTY, new ByteArrayOutputStream(), error);
+
+        assertEquals(2, exit);
+        assertEquals("Configuration error: CODING_AGENT_COLOR must be auto, always, or never\n",
+                error.toString(StandardCharsets.UTF_8));
     }
 
     @Test

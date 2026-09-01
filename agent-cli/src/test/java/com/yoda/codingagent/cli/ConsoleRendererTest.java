@@ -17,6 +17,7 @@ import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.Duration;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class ConsoleRendererTest {
@@ -74,6 +75,70 @@ class ConsoleRendererTest {
         assertFalse(output.contains(key));
         assertTrue(output.contains("<redacted>"));
         assertEquals(1, occurrences(output, "[error]"));
+    }
+
+    @Test
+    void colorsStructuredEventsWithoutColoringStreamedModelText() {
+        String key = "test-render-key";
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        ConsoleRenderer renderer = new ConsoleRenderer(
+                new PrintWriter(bytes, true, StandardCharsets.UTF_8),
+                new SecretRedactor(key)::redact,
+                TerminalStyle.resolve(Map.of("CODING_AGENT_COLOR", "always"), false));
+        WorkspaceId workspace = WorkspaceId.random();
+        SessionId session = SessionId.random();
+        TurnId turn = TurnId.random();
+        Instant now = Instant.now();
+
+        renderer.render(new AgentEvent.ModelTextDelta(
+                workspace, session, turn, 1, now,
+                "plain\u001B[31m " + key));
+        renderer.render(new AgentEvent.ToolStarted(
+                workspace, session, turn, 2, now, "call", "read_file"));
+        renderer.render(new AgentEvent.ToolCompleted(
+                workspace, session, turn, 3, now, "call", "read_file", false));
+        renderer.render(new AgentEvent.TurnFailed(
+                workspace, session, turn, 4, now, ErrorCode.INTERNAL_ERROR, "failed turn"));
+        renderer.render(new AgentEvent.TurnLimitReached(
+                workspace, session, turn, 5, now, ErrorCode.TURN_LIMIT, "step limit"));
+        renderer.render(new AgentEvent.TurnCancelled(
+                workspace, session, turn, 6, now));
+        renderer.prompt();
+
+        String output = bytes.toString(StandardCharsets.UTF_8);
+        assertTrue(output.startsWith("plain[31m <redacted>\n"));
+        assertTrue(output.contains("\u001B[35m[tool]\u001B[0m"));
+        assertTrue(output.contains("\u001B[33mstarted\u001B[0m"));
+        assertTrue(output.contains("\u001B[1;31mfailed\u001B[0m"));
+        assertTrue(output.contains("\u001B[1;31m[error] INTERNAL_ERROR:\u001B[0m"));
+        assertTrue(output.contains("\u001B[1;33m[limit] TURN_LIMIT:\u001B[0m"));
+        assertTrue(output.contains("\u001B[33m[cancelled]\u001B[0m"));
+        assertTrue(output.endsWith("\u001B[1;36mcoding-agent> \u001B[0m"));
+        assertFalse(output.contains(key));
+    }
+
+    @Test
+    void plainRendererKeepsExistingOutputExactlyForNormalText() {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        ConsoleRenderer renderer = new ConsoleRenderer(
+                new PrintWriter(bytes, true, StandardCharsets.UTF_8), value -> value);
+        WorkspaceId workspace = WorkspaceId.random();
+        SessionId session = SessionId.random();
+        TurnId turn = TurnId.random();
+        Instant now = Instant.now();
+
+        renderer.render(new AgentEvent.ToolStarted(
+                workspace, session, turn, 1, now, "call", "read_file"));
+        renderer.render(new AgentEvent.ToolCompleted(
+                workspace, session, turn, 2, now, "call", "read_file", true));
+        renderer.error("problem");
+        renderer.prompt();
+        renderer.prompt();
+
+        assertEquals("[tool] read_file started\n"
+                + "[tool] read_file completed\n"
+                + "[error] problem\n"
+                + "coding-agent> ", bytes.toString(StandardCharsets.UTF_8));
     }
 
     private static int occurrences(String value, String target) {

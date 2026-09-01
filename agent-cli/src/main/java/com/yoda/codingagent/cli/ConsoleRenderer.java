@@ -15,42 +15,52 @@ public final class ConsoleRenderer {
 
     private final PrintWriter output;
     private final UnaryOperator<String> redactor;
+    private final TerminalStyle style;
     private boolean inlineText;
     private boolean promptVisible;
 
     public ConsoleRenderer(PrintWriter output, UnaryOperator<String> redactor) {
+        this(output, redactor, TerminalStyle.plain());
+    }
+
+    ConsoleRenderer(PrintWriter output, UnaryOperator<String> redactor,
+                    TerminalStyle style) {
         this.output = Objects.requireNonNull(output, "output");
         this.redactor = Objects.requireNonNull(redactor, "redactor");
+        this.style = Objects.requireNonNull(style, "style");
     }
 
     public synchronized void render(AgentEvent event) {
         promptVisible = false;
         if (event instanceof AgentEvent.ModelTextDelta delta) {
-            output.print(redactor.apply(delta.text()));
+            output.print(safe(delta.text()));
             output.flush();
             inlineText = true;
         } else if (event instanceof AgentEvent.ToolStarted started) {
             separateLine();
-            output.println("[tool] " + started.toolName() + " started");
+            output.println(style.tool("[tool]") + " " + style.safe(started.toolName())
+                    + " " + style.warning("started"));
             output.flush();
         } else if (event instanceof AgentEvent.ToolCompleted completed) {
             separateLine();
-            output.println("[tool] " + completed.toolName() + " "
-                    + (completed.success() ? "completed" : "failed"));
+            String status = completed.success()
+                    ? style.success("completed") : style.error("failed");
+            output.println(style.tool("[tool]") + " " + style.safe(completed.toolName())
+                    + " " + status);
             output.flush();
         } else if (event instanceof AgentEvent.TurnFailed failed) {
             separateLine();
-            output.println("[error] " + failed.errorCode() + ": "
-                    + redactor.apply(failed.safeMessage()));
+            output.println(style.error("[error] " + failed.errorCode() + ":")
+                    + " " + safe(failed.safeMessage()));
             output.flush();
         } else if (event instanceof AgentEvent.TurnLimitReached limited) {
             separateLine();
-            output.println("[limit] " + limited.errorCode() + ": "
-                    + redactor.apply(limited.safeMessage()));
+            output.println(style.strongWarning("[limit] " + limited.errorCode() + ":")
+                    + " " + safe(limited.safeMessage()));
             output.flush();
         } else if (event instanceof AgentEvent.TurnCancelled) {
             separateLine();
-            output.println("[cancelled]");
+            output.println(style.warning("[cancelled]"));
             output.flush();
         } else if (event instanceof AgentEvent.TurnCompleted) {
             separateLine();
@@ -68,7 +78,7 @@ public final class ConsoleRenderer {
         if (promptVisible) {
             return;
         }
-        output.print("coding-agent> ");
+        output.print(style.prompt("coding-agent> "));
         output.flush();
         promptVisible = true;
     }
@@ -80,23 +90,26 @@ public final class ConsoleRenderer {
     public synchronized void line(String message) {
         separateLine();
         promptVisible = false;
-        output.println(redactor.apply(message));
+        output.println(safe(message));
         output.flush();
     }
 
     public synchronized void error(String message) {
-        line("[error] " + message);
+        separateLine();
+        promptVisible = false;
+        output.println(style.error("[error]") + " " + safe(message));
+        output.flush();
     }
 
     public synchronized void workspaces(List<WorkspaceDescriptor> workspaces) {
         separateLine();
         for (WorkspaceDescriptor workspace : workspaces) {
-            output.println(workspace.workspaceId() + "  " + workspace.status()
-                    + "  " + redactor.apply(workspace.displayName())
-                    + "  " + redactor.apply(workspace.root().toString()));
+            output.println(style.identifier(workspace.workspaceId().toString()) + "  "
+                    + workspaceStatus(workspace) + "  " + safe(workspace.displayName())
+                    + "  " + safe(workspace.root().toString()));
         }
         if (workspaces.isEmpty()) {
-            output.println("No workspaces.");
+            output.println(style.muted("No workspaces."));
         }
         output.flush();
     }
@@ -104,10 +117,11 @@ public final class ConsoleRenderer {
     public synchronized void sessions(List<SessionDescriptor> sessions) {
         separateLine();
         for (SessionDescriptor session : sessions) {
-            output.println(session.sessionId() + "  " + session.status());
+            output.println(style.identifier(session.sessionId().toString()) + "  "
+                    + sessionStatus(session));
         }
         if (sessions.isEmpty()) {
-            output.println("No sessions in the current workspace.");
+            output.println(style.muted("No sessions in the current workspace."));
         }
         output.flush();
     }
@@ -115,18 +129,26 @@ public final class ConsoleRenderer {
     public synchronized void context(SessionContextSummary summary,
                                      ContextView.Snapshot snapshot) {
         separateLine();
-        output.println("Session: " + summary.sessionId());
-        output.println("Workspace: " + summary.workspaceId());
-        output.println("Completed turns: " + summary.completedTurnCount()
-                + ", digests: " + summary.digestCount());
+        output.println(style.label("Session:") + " "
+                + style.identifier(summary.sessionId().toString()));
+        output.println(style.label("Workspace:") + " "
+                + style.identifier(summary.workspaceId().toString()));
+        output.println(style.label("Completed turns:") + " "
+                + summary.completedTurnCount() + ", " + style.label("digests:")
+                + " " + summary.digestCount());
         if (snapshot == null) {
-            output.println("Context snapshot: unavailable in this process");
+            output.println(style.label("Context snapshot:")
+                    + " unavailable in this process");
         } else {
-            output.println("Context tokens: " + snapshot.estimatedInputTokens()
+            output.println(style.label("Context tokens:") + " "
+                    + snapshot.estimatedInputTokens()
                     + "/" + snapshot.maxInputTokens()
-                    + ", full turns: " + snapshot.fullTurnIds().size()
-                    + ", digests: " + snapshot.digestTurnIds().size()
-                    + ", omitted: " + snapshot.omittedTurnCount());
+                    + ", " + style.label("full turns:") + " "
+                    + snapshot.fullTurnIds().size()
+                    + ", " + style.label("digests:") + " "
+                    + snapshot.digestTurnIds().size()
+                    + ", " + style.label("omitted:") + " "
+                    + snapshot.omittedTurnCount());
         }
         output.flush();
     }
@@ -136,10 +158,33 @@ public final class ConsoleRenderer {
                 && summary.unknownToolCalls() == 0 && summary.cancelledToolCalls() == 0) {
             return;
         }
-        line("Recovered interrupted state: turns=" + summary.interruptedTurns()
+        separateLine();
+        promptVisible = false;
+        output.println(style.warning("Recovered interrupted state:")
+                + " turns=" + summary.interruptedTurns()
                 + ", steps=" + summary.abortedSteps()
                 + ", unknown-tools=" + summary.unknownToolCalls()
                 + ", cancelled-tools=" + summary.cancelledToolCalls());
+        output.flush();
+    }
+
+    private String workspaceStatus(WorkspaceDescriptor workspace) {
+        return switch (workspace.status()) {
+            case ACTIVE -> style.success(workspace.status().toString());
+            case ARCHIVED -> style.inactive(workspace.status().toString());
+            case UNAVAILABLE -> style.error(workspace.status().toString());
+        };
+    }
+
+    private String sessionStatus(SessionDescriptor session) {
+        return switch (session.status()) {
+            case OPEN -> style.success(session.status().toString());
+            case CLOSED -> style.inactive(session.status().toString());
+        };
+    }
+
+    private String safe(String message) {
+        return style.safe(redactor.apply(message));
     }
 
     private void separateLine() {

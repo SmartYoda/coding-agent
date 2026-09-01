@@ -67,7 +67,14 @@ public final class CliApplication {
         PrintWriter err = new PrintWriter(error, true, StandardCharsets.UTF_8);
         SecretRedactor redactor = new SecretRedactor(environment.getOrDefault(
                 "LLM_API_KEY", environment.getOrDefault("DASHSCOPE_API_KEY", "")));
+        TerminalStyle outputStyle = TerminalStyle.plain();
+        TerminalStyle errorStyle = TerminalStyle.plain();
         try {
+            boolean systemConsole = System.console() != null;
+            outputStyle = TerminalStyle.resolve(environment,
+                    systemConsole && output == System.out);
+            errorStyle = TerminalStyle.resolve(environment,
+                    systemConsole && error == System.err);
             CliArguments cli = CliArguments.parse(args);
             if (cli.help()) {
                 printHelp(out);
@@ -81,14 +88,15 @@ public final class CliApplication {
                 WorkspaceDescriptor workspace = selectWorkspace(service, cli);
                 SessionDescriptor session = selectSession(service, workspace, cli, config);
                 return interact(service, workspace, session, config, runtime,
-                        input, out, redactor);
+                        input, out, redactor, outputStyle);
             }
         } catch (IllegalArgumentException exception) {
-            err.println("Configuration error: " + redactor.redact(exception.getMessage()));
+            printError(err, errorStyle, "Configuration error",
+                    redactor.redact(exception.getMessage()));
             return 2;
         } catch (RuntimeException exception) {
             String message = exception.getMessage();
-            err.println("Startup error: " + redactor.redact(
+            printError(err, errorStyle, "Startup error", redactor.redact(
                     message == null ? "unexpected failure" : message));
             return 1;
         }
@@ -170,8 +178,8 @@ public final class CliApplication {
     private static int interact(AgentService service, WorkspaceDescriptor workspace,
                                 SessionDescriptor session, AgentConfig config,
                                 CliRuntime runtime, InputStream input, PrintWriter output,
-                                SecretRedactor redactor) {
-        ConsoleRenderer renderer = new ConsoleRenderer(output, redactor::redact);
+                                SecretRedactor redactor, TerminalStyle style) {
+        ConsoleRenderer renderer = new ConsoleRenderer(output, redactor::redact, style);
         CliController controller = new CliController(service, config.defaultRunLimits(),
                 config.defaultThinkingEnabled(),
                 workspace, session, renderer, new ContextView(),
@@ -229,5 +237,10 @@ public final class CliApplication {
         output.println("  --reserved-output-tokens <n>  Reserved model output budget");
         output.println("  --recent-full-turns <n>       Full recent turns in context");
         output.println("  --help                        Show this help");
+    }
+
+    private static void printError(PrintWriter output, TerminalStyle style,
+                                   String label, String message) {
+        output.println(style.error(label + ":") + " " + style.safe(message));
     }
 }
