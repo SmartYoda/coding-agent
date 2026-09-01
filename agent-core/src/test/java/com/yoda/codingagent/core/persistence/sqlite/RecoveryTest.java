@@ -95,7 +95,7 @@ class RecoveryTest {
                 config.maxResponseCharacters(), recovered,
                 new ContextManager(new TokenEstimator()), new TurnDigestFactory(), redactor);
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
-                DefaultAgentService.DEFAULT_SYSTEM_PROMPT, redactor);
+                DefaultAgentService.DEFAULT_SYSTEM_PROMPT, redactor, false);
         var continued = service.runTurn(session.sessionId(), new AgentRequest("continue"),
                 ignored -> { }, CancellationToken.NONE);
         assertEquals(TurnStatus.COMPLETED, continued.status());

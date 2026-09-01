@@ -1,6 +1,7 @@
 package com.yoda.codingagent.cli;
 
 import com.yoda.codingagent.core.api.SessionId;
+import com.yoda.codingagent.core.api.ThinkingMode;
 import com.yoda.codingagent.core.api.WorkspaceId;
 import java.nio.file.Path;
 import java.util.Locale;
@@ -10,7 +11,7 @@ sealed interface CliCommand permits CliCommand.Prompt, CliCommand.Help, CliComma
         CliCommand.Cancel, CliCommand.Context, CliCommand.WorkspaceList,
         CliCommand.WorkspaceAdd, CliCommand.WorkspaceUse, CliCommand.WorkspaceArchive,
         CliCommand.SessionList, CliCommand.SessionNew, CliCommand.SessionUse,
-        CliCommand.SessionClose {
+        CliCommand.SessionClose, CliCommand.ThinkingShow, CliCommand.ThinkingSet {
 
     static CliCommand parse(String input) {
         if (input == null) {
@@ -30,10 +31,28 @@ sealed interface CliCommand permits CliCommand.Prompt, CliCommand.Help, CliComma
             case "/exit" -> requireArity(parts, 1, new Exit());
             case "/cancel" -> requireArity(parts, 1, new Cancel());
             case "/context" -> requireArity(parts, 1, new Context());
+            case "/thinking" -> parseThinking(parts);
             case "/workspace" -> parseWorkspace(parts);
             case "/session" -> parseSession(parts);
             default -> throw new IllegalArgumentException("unknown command: " + parts[0]);
         };
+    }
+
+    private static CliCommand parseThinking(String[] parts) {
+        if (parts.length == 1) {
+            return new ThinkingShow();
+        }
+        if (parts.length != 2) {
+            throw new IllegalArgumentException("usage: /thinking [on|off|default]");
+        }
+        ThinkingMode mode = switch (parts[1].toLowerCase(Locale.ROOT)) {
+            case "on" -> ThinkingMode.ENABLED;
+            case "off" -> ThinkingMode.DISABLED;
+            case "default" -> ThinkingMode.DEFAULT;
+            default -> throw new IllegalArgumentException(
+                    "usage: /thinking [on|off|default]");
+        };
+        return new ThinkingSet(mode);
     }
 
     private static CliCommand parseWorkspace(String[] parts) {
@@ -113,6 +132,12 @@ sealed interface CliCommand permits CliCommand.Prompt, CliCommand.Help, CliComma
     record Exit() implements CliCommand { }
     record Cancel() implements CliCommand { }
     record Context() implements CliCommand { }
+    record ThinkingShow() implements CliCommand { }
+    record ThinkingSet(ThinkingMode mode) implements CliCommand {
+        public ThinkingSet {
+            java.util.Objects.requireNonNull(mode, "mode");
+        }
+    }
     record WorkspaceList() implements CliCommand { }
     record WorkspaceAdd(String name, Path path) implements CliCommand { }
     record WorkspaceUse(WorkspaceId workspaceId) implements CliCommand { }

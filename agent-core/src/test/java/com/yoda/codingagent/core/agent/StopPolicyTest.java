@@ -18,7 +18,7 @@ class StopPolicyTest {
     @Test
     void cancellationWinsOverDeadlineAndStepLimit() {
         Instant startedAt = Instant.parse("2026-08-30T00:00:00Z");
-        AgentTurn turn = new AgentTurn(TurnId.random(), SessionId.random(), startedAt);
+        AgentTurn turn = new AgentTurn(TurnId.random(), SessionId.random(), startedAt, false);
         turn.beginNextStep();
         RunLimits limits = new RunLimits(1, Duration.ofSeconds(1),
                 Duration.ofSeconds(1), Duration.ofSeconds(1),
@@ -39,7 +39,7 @@ class StopPolicyTest {
     @Test
     void stepLimitAppliesOnlyBeforeStartingAnotherModelStep() {
         Instant startedAt = Instant.parse("2026-08-30T00:00:00Z");
-        AgentTurn turn = new AgentTurn(TurnId.random(), SessionId.random(), startedAt);
+        AgentTurn turn = new AgentTurn(TurnId.random(), SessionId.random(), startedAt, false);
         turn.beginNextStep();
         RunLimits limits = new RunLimits(1, Duration.ofSeconds(10),
                 Duration.ofSeconds(5), Duration.ofSeconds(5),

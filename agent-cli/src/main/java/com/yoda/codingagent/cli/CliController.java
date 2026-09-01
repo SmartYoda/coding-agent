@@ -8,6 +8,7 @@ import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
 import com.yoda.codingagent.core.api.SessionId;
 import com.yoda.codingagent.core.api.SessionStatus;
+import com.yoda.codingagent.core.api.ThinkingMode;
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.api.WorkspaceId;
 import com.yoda.codingagent.core.api.WorkspaceStatus;
@@ -25,6 +26,7 @@ final class CliController {
 
     private final AgentService service;
     private final RunLimits defaultRunLimits;
+    private final boolean defaultThinkingEnabled;
     private final ConsoleRenderer renderer;
     private final ContextView contextView;
     private final ExecutorService executor;
@@ -36,13 +38,16 @@ final class CliController {
     private FutureTask<Void> activeTask;
     private long generation;
     private boolean exiting;
+    private ThinkingMode thinkingMode = ThinkingMode.DEFAULT;
 
     CliController(AgentService service, RunLimits defaultRunLimits,
+                  boolean defaultThinkingEnabled,
                   WorkspaceDescriptor workspace, SessionDescriptor session,
                   ConsoleRenderer renderer, ContextView contextView,
                   ExecutorService executor) {
         this.service = Objects.requireNonNull(service, "service");
         this.defaultRunLimits = Objects.requireNonNull(defaultRunLimits, "defaultRunLimits");
+        this.defaultThinkingEnabled = defaultThinkingEnabled;
         this.workspace = Objects.requireNonNull(workspace, "workspace");
         this.session = Objects.requireNonNull(session, "session");
         this.renderer = Objects.requireNonNull(renderer, "renderer");
@@ -75,6 +80,14 @@ final class CliController {
             renderer.error("A turn is active; use /cancel, /context, /help, or /exit.");
             return Outcome.continueWithPrompt();
         }
+        if (command instanceof CliCommand.ThinkingShow) {
+            renderThinking();
+            return Outcome.continueWithPrompt();
+        }
+        if (command instanceof CliCommand.ThinkingSet thinking) {
+            setThinking(thinking.mode());
+            return Outcome.continueWithPrompt();
+        }
         handleManagement(command);
         return Outcome.continueWithPrompt();
     }
@@ -86,6 +99,7 @@ final class CliController {
     private void startTurn(String input) {
         long taskGeneration;
         SessionId sessionId;
+        ThinkingMode capturedThinkingMode;
         final CancellationSource source = new CancellationSource();
         FutureTask<Void> task;
         String rejection = null;
@@ -94,21 +108,26 @@ final class CliController {
                 rejection = "A turn is already active.";
                 taskGeneration = 0;
                 sessionId = null;
+                capturedThinkingMode = null;
                 task = null;
             } else if (session == null || session.status() != SessionStatus.OPEN) {
                 rejection = "No OPEN session is selected; use /session new or /session use.";
                 taskGeneration = 0;
                 sessionId = null;
+                capturedThinkingMode = null;
                 task = null;
             } else {
                 taskGeneration = ++generation;
                 sessionId = session.sessionId();
+                capturedThinkingMode = thinkingMode;
                 cancellationSource = source;
                 state = State.RUNNING;
                 long capturedGeneration = taskGeneration;
                 SessionId capturedSessionId = sessionId;
+                ThinkingMode turnThinkingMode = capturedThinkingMode;
                 task = new FutureTask<>(() -> {
-                    runTurn(capturedGeneration, capturedSessionId, input, source);
+                    runTurn(capturedGeneration, capturedSessionId, input,
+                            turnThinkingMode, source);
                     return null;
                 });
                 activeTask = task;
@@ -137,9 +156,10 @@ final class CliController {
     }
 
     private void runTurn(long taskGeneration, SessionId sessionId, String input,
-                         CancellationSource source) {
+                         ThinkingMode turnThinkingMode, CancellationSource source) {
         try {
-            var result = service.runTurn(sessionId, new AgentRequest(input), event -> {
+            var result = service.runTurn(sessionId,
+                    new AgentRequest(input, turnThinkingMode), event -> {
                 contextView.accept(taskGeneration, event);
                 renderer.render(event);
             }, source);
@@ -241,6 +261,23 @@ final class CliController {
                 contextView.snapshotFor(current.sessionId()));
     }
 
+    private void setThinking(ThinkingMode requested) {
+        synchronized (this) {
+            thinkingMode = Objects.requireNonNull(requested, "requested");
+        }
+        renderThinking();
+    }
+
+    private void renderThinking() {
+        String message;
+        synchronized (this) {
+            message = "Thinking mode: override=" + thinkingMode
+                    + ", effective="
+                    + (thinkingMode.resolve(defaultThinkingEnabled) ? "on" : "off") + ".";
+        }
+        renderer.line(message);
+    }
+
     private void handleManagement(CliCommand command) {
         if (command instanceof CliCommand.WorkspaceList) {
             renderer.workspaces(service.listWorkspaces());
@@ -330,6 +367,7 @@ final class CliController {
         return """
                 /workspace list|add <name> <path>|use <id>|archive <id>
                 /session list|new|use <id>|close [id]
+                /thinking [on|off|default]  show or set thinking for future turns
                 /context  show persisted summary and the latest in-process context budget
                 /cancel   request cancellation of the active turn
                 /help     show commands

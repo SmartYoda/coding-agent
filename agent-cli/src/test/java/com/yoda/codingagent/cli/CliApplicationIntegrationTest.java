@@ -32,6 +32,29 @@ import org.junit.jupiter.api.io.TempDir;
 class CliApplicationIntegrationTest {
 
     @Test
+    void interactiveThinkingCommandsUseTheConfiguredStartupDefault(@TempDir Path temp)
+            throws Exception {
+        Path workspace = Files.createDirectory(temp.resolve("workspace"));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        CliApplication application = new CliApplication(config -> (request, sink, token) -> {
+            throw new AssertionError("model must not be called");
+        });
+
+        int exit = application.run(new String[]{
+                        "--workspace", "main=" + workspace,
+                        "--data-dir", temp.resolve("state").toString(),
+                        "--enable-thinking", "true"},
+                Map.of("LLM_API_KEY", "offline-key"),
+                input("/thinking\n/thinking off\n/thinking default\n/thinking\n/exit\n"),
+                output, new ByteArrayOutputStream());
+
+        assertEquals(0, exit);
+        String rendered = output.toString(StandardCharsets.UTF_8);
+        assertTrue(rendered.contains("override=DEFAULT, effective=on"));
+        assertTrue(rendered.contains("override=DISABLED, effective=off"));
+    }
+
+    @Test
     void cliThinkingFlagOverridesEnvironmentInBothDirections(@TempDir Path temp)
             throws Exception {
         Path workspace = Files.createDirectory(temp.resolve("workspace"));
@@ -53,7 +76,7 @@ class CliApplicationIntegrationTest {
                 input("/exit\n"), new ByteArrayOutputStream(), new ByteArrayOutputStream());
 
         assertEquals(0, exit);
-        assertTrue(capturedConfig.get().thinkingEnabled());
+        assertTrue(capturedConfig.get().defaultThinkingEnabled());
 
         int disabledExit = application.run(new String[]{
                         "--workspace", "main=" + workspace,
@@ -63,7 +86,7 @@ class CliApplicationIntegrationTest {
                 input("/exit\n"), new ByteArrayOutputStream(), new ByteArrayOutputStream());
 
         assertEquals(0, disabledExit);
-        assertFalse(capturedConfig.get().thinkingEnabled());
+        assertFalse(capturedConfig.get().defaultThinkingEnabled());
     }
 
     @Test
@@ -259,7 +282,10 @@ class CliApplicationIntegrationTest {
                 output, new ByteArrayOutputStream());
 
         assertEquals(0, exit);
-        assertTrue(output.toString(StandardCharsets.UTF_8).contains("Usage:"));
+        String help = output.toString(StandardCharsets.UTF_8);
+        assertTrue(help.contains("Usage:"));
+        assertTrue(help.contains("Default thinking mode per turn"));
+        assertTrue(help.contains("Context input budget (default: 131072)"));
     }
 
     @Test
@@ -297,7 +323,7 @@ class CliApplicationIntegrationTest {
                 new com.yoda.codingagent.core.api.SessionConfig(
                         registered.workspaceId(), config.defaultRunLimits()), "system");
         initial.beginTurn(TurnId.random(), session.sessionId(), java.time.Instant.now(),
-                "interrupted input");
+                "interrupted input", false);
         initialLock.close();
         ByteArrayOutputStream output = new ByteArrayOutputStream();
 

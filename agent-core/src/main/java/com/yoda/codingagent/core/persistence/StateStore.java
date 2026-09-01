@@ -42,7 +42,8 @@ public interface StateStore {
 
     CanonicalHistory loadCanonicalHistory(SessionId sessionId);
 
-    void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt, String userInput);
+    void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt, String userInput,
+                   boolean thinkingEnabled);
 
     void markTurnStreaming(TurnId turnId, int stepNo);
 

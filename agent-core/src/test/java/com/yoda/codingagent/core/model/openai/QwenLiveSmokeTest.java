@@ -10,12 +10,10 @@ import com.yoda.codingagent.core.api.CancellationToken;
 import com.yoda.codingagent.core.api.AgentEvent;
 import com.yoda.codingagent.core.api.AgentRequest;
 import com.yoda.codingagent.core.api.AgentResult;
-import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionConfig;
-import com.yoda.codingagent.core.api.SessionId;
+import com.yoda.codingagent.core.api.ThinkingMode;
 import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.api.TurnStatus;
-import com.yoda.codingagent.core.api.WorkspaceId;
 import com.yoda.codingagent.core.agent.AgentRunner;
 import com.yoda.codingagent.core.agent.DefaultAgentService;
 import com.yoda.codingagent.core.agent.SessionRegistry;
@@ -43,7 +41,10 @@ import com.yoda.codingagent.core.workspace.WorkspaceRegistry;
 import com.yoda.codingagent.core.workspace.WorkspaceResolver;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -100,7 +101,8 @@ class QwenLiveSmokeTest {
         Map<String, String> environment = liveEnvironment();
         ObjectMapper objectMapper = new ObjectMapper();
         AgentConfig config = new AgentConfigLoader().load(
-                Map.of("dataDirectory", tempDirectory.resolve("state").toString()), environment);
+                Map.of("dataDirectory", tempDirectory.resolve("state").toString(),
+                        "enableThinking", "false"), environment);
         AtomicInteger executions = new AtomicInteger();
         ObjectNode schema = objectMapper.createObjectNode();
         schema.put("type", "object");
@@ -140,10 +142,9 @@ class QwenLiveSmokeTest {
                 new SecretRedactor(config.apiKey()));
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
                 DefaultAgentService.DEFAULT_SYSTEM_PROMPT,
-                new SecretRedactor(config.apiKey()));
+                new SecretRedactor(config.apiKey()), config.defaultThinkingEnabled());
         var session = service.openSession(new SessionConfig(workspace.workspaceId(),
-                new RunLimits(4, Duration.ofMinutes(2), config.modelTimeout(),
-                        Duration.ofSeconds(10), 16_384, 8_192, 512, 2)));
+                config.defaultRunLimits()));
         List<AgentEvent> events = new ArrayList<>();
 
         AgentResult result = service.runTurn(session.sessionId(),
@@ -166,6 +167,31 @@ class QwenLiveSmokeTest {
         for (int index = 0; index < events.size(); index++) {
             assertEquals(index + 1L, events.get(index).sequence());
         }
+
+        AgentResult enabled = service.runTurn(session.sessionId(),
+                new AgentRequest("不要调用工具。只用一句中文回答：思考模式测试。",
+                        ThinkingMode.ENABLED),
+                ignored -> { }, CancellationToken.NONE);
+        AgentResult disabled = service.runTurn(session.sessionId(),
+                new AgentRequest("不要调用工具。只用一句中文回答：非思考模式测试。",
+                        ThinkingMode.DISABLED),
+                ignored -> { }, CancellationToken.NONE);
+
+        assertEquals(TurnStatus.COMPLETED, enabled.status(), enabled.errorMessage());
+        assertEquals(TurnStatus.COMPLETED, disabled.status(), disabled.errorMessage());
+        assertEquals(131_072, service.getSessionContext(session.sessionId())
+                .runLimits().maxInputTokens());
+        List<Integer> persistedThinking = new ArrayList<>();
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + config.databasePath());
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery(
+                     "SELECT thinking_enabled FROM turns ORDER BY turn_no")) {
+            while (resultSet.next()) {
+                persistedThinking.add(resultSet.getInt(1));
+            }
+        }
+        assertEquals(List.of(0, 1, 0), persistedThinking);
     }
 
     private static Map<String, String> liveEnvironment() {
@@ -213,7 +239,8 @@ class QwenLiveSmokeTest {
         ModelResponseAccumulator accumulator = new ModelResponseAccumulator(
                 objectMapper, config.maxResponseCharacters());
         client.stream(new ModelRequest(config.model(), messages, tools,
-                        config.modelTimeout(), 512), accumulator, CancellationToken.NONE);
+                        config.modelTimeout(), 512, config.defaultThinkingEnabled()),
+                accumulator, CancellationToken.NONE);
         return accumulator.response();
     }
 }

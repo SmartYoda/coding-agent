@@ -65,7 +65,7 @@ class AgentTurnTest {
 
     private AgentTurn turn() {
         return new AgentTurn(TurnId.random(), SessionId.random(),
-                Instant.parse("2026-08-30T00:00:00Z"));
+                Instant.parse("2026-08-30T00:00:00Z"), false);
     }
 
     private ToolCall call(String id) {

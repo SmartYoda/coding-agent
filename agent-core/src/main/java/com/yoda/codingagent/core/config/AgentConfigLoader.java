@@ -50,7 +50,7 @@ public final class AgentConfigLoader {
                 "maxToolOutputChars", "CODING_AGENT_MAX_TOOL_OUTPUT_CHARS", "20000"),
                 "maxToolOutputChars");
         int maxInputTokens = parseInt(value(overrides, environment, "maxInputTokens",
-                "CODING_AGENT_MAX_INPUT_TOKENS", "65536"), "maxInputTokens");
+                "CODING_AGENT_MAX_INPUT_TOKENS", "131072"), "maxInputTokens");
         int reservedOutputTokens = parseInt(value(overrides, environment,
                 "reservedOutputTokens", "CODING_AGENT_RESERVED_OUTPUT_TOKENS", "8192"),
                 "reservedOutputTokens");

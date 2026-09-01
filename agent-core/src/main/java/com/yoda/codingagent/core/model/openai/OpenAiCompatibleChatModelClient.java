@@ -196,7 +196,7 @@ public final class OpenAiCompatibleChatModelClient implements ModelClient {
         root.set("messages", messagesJson(request));
         root.put("stream", true);
         root.putObject("stream_options").put("include_usage", true);
-        root.put("enable_thinking", config.thinkingEnabled());
+        root.put("enable_thinking", request.thinkingEnabled());
         root.put("max_tokens", request.maxOutputTokens());
         if (!request.tools().isEmpty()) {
             root.set("tools", toolsJson(request));

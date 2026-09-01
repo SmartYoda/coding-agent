@@ -1,8 +1,10 @@
 package com.yoda.codingagent.cli;
 
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.yoda.codingagent.core.api.ThinkingMode;
 import org.junit.jupiter.api.Test;
 
 class CliCommandTest {
@@ -19,11 +21,22 @@ class CliCommandTest {
                 CliCommand.parse("/session close"));
         assertInstanceOf(CliCommand.Context.class, CliCommand.parse("/context"));
         assertInstanceOf(CliCommand.Cancel.class, CliCommand.parse("/cancel"));
+        assertInstanceOf(CliCommand.ThinkingShow.class, CliCommand.parse("/thinking"));
+        assertEquals(ThinkingMode.ENABLED,
+                ((CliCommand.ThinkingSet) CliCommand.parse("/thinking ON")).mode());
+        assertEquals(ThinkingMode.DISABLED,
+                ((CliCommand.ThinkingSet) CliCommand.parse("/thinking off")).mode());
+        assertEquals(ThinkingMode.DEFAULT,
+                ((CliCommand.ThinkingSet) CliCommand.parse("/thinking default")).mode());
         assertInstanceOf(CliCommand.Exit.class, CliCommand.parse(null));
 
         assertThrows(IllegalArgumentException.class,
                 () -> CliCommand.parse("/workspace add missing-path"));
         assertThrows(IllegalArgumentException.class,
                 () -> CliCommand.parse("/unknown"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CliCommand.parse("/thinking yes"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CliCommand.parse("/thinking on extra"));
     }
 }

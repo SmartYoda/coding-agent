@@ -29,7 +29,7 @@ class AgentConfigLoaderTest {
         assertEquals(20, config.defaultRunLimits().maxSteps());
         assertEquals(Duration.ofSeconds(900), config.defaultRunLimits().turnTimeout());
         assertEquals(20_000, config.defaultRunLimits().maxToolOutputChars());
-        assertEquals(65_536, config.defaultRunLimits().maxInputTokens());
+        assertEquals(131_072, config.defaultRunLimits().maxInputTokens());
         assertEquals(8_192, config.defaultRunLimits().reservedOutputTokens());
         assertEquals(4, config.defaultRunLimits().recentFullTurns());
     }

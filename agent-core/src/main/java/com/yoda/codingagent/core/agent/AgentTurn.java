@@ -17,15 +17,18 @@ public final class AgentTurn {
     private final TurnId turnId;
     private final SessionId sessionId;
     private final Instant startedAt;
+    private final boolean thinkingEnabled;
     private final Set<String> acceptedToolCallIds = new HashSet<>();
     private int stepCount;
     private int toolCallCount;
     private TerminalSnapshot terminal;
 
-    public AgentTurn(TurnId turnId, SessionId sessionId, Instant startedAt) {
+    public AgentTurn(TurnId turnId, SessionId sessionId, Instant startedAt,
+                     boolean thinkingEnabled) {
         this.turnId = Objects.requireNonNull(turnId, "turnId");
         this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
         this.startedAt = Objects.requireNonNull(startedAt, "startedAt");
+        this.thinkingEnabled = thinkingEnabled;
     }
 
     public TurnId turnId() { return turnId; }
@@ -33,6 +36,8 @@ public final class AgentTurn {
     public SessionId sessionId() { return sessionId; }
 
     public Instant startedAt() { return startedAt; }
+
+    public boolean thinkingEnabled() { return thinkingEnabled; }
 
     public int stepCount() { return stepCount; }
 

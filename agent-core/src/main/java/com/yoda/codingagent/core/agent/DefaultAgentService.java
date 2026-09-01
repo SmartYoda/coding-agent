@@ -34,12 +34,14 @@ public final class DefaultAgentService implements AgentService {
     private final AgentRunner agentRunner;
     private final String systemPrompt;
     private final SecretRedactor secretRedactor;
+    private final boolean defaultThinkingEnabled;
 
     public DefaultAgentService(WorkspaceRegistry workspaceRegistry,
                                SessionRegistry sessionRegistry,
                                AgentRunner agentRunner,
                                String systemPrompt,
-                               SecretRedactor secretRedactor) {
+                               SecretRedactor secretRedactor,
+                               boolean defaultThinkingEnabled) {
         this.workspaceRegistry = Objects.requireNonNull(workspaceRegistry, "workspaceRegistry");
         this.sessionRegistry = Objects.requireNonNull(sessionRegistry, "sessionRegistry");
         this.agentRunner = Objects.requireNonNull(agentRunner, "agentRunner");
@@ -48,6 +50,7 @@ public final class DefaultAgentService implements AgentService {
             throw new IllegalArgumentException("systemPrompt must not be blank");
         }
         this.systemPrompt = systemPrompt;
+        this.defaultThinkingEnabled = defaultThinkingEnabled;
     }
 
     @Override
@@ -97,8 +100,11 @@ public final class DefaultAgentService implements AgentService {
         try (SessionRegistry.Lease lease = sessionRegistry.acquire(sessionId)) {
             Objects.requireNonNull(request, "request");
             AgentRequest safeRequest = new AgentRequest(
-                    secretRedactor.redact(request.input()));
-            return agentRunner.run(lease.session(), safeRequest, eventSink, cancellationToken);
+                    secretRedactor.redact(request.input()), request.thinkingMode());
+            boolean thinkingEnabled = safeRequest.thinkingMode()
+                    .resolve(defaultThinkingEnabled);
+            return agentRunner.run(lease.session(), safeRequest, thinkingEnabled,
+                    eventSink, cancellationToken);
         }
     }
 }

@@ -178,7 +178,7 @@ class SessionServiceTest {
                 new SecretRedactor(config.apiKey()));
         AgentService service = new DefaultAgentService(workspaces, sessions, runner,
                 DefaultAgentService.DEFAULT_SYSTEM_PROMPT,
-                new SecretRedactor(config.apiKey()));
+                new SecretRedactor(config.apiKey()), false);
         return new TestApplication(config, lock, sessions, service);
     }
 

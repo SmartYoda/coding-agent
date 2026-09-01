@@ -154,7 +154,7 @@ class RestartIntegrationTest {
                 new SecretRedactor(config.apiKey()));
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
                 DefaultAgentService.DEFAULT_SYSTEM_PROMPT,
-                new SecretRedactor(config.apiKey()));
+                new SecretRedactor(config.apiKey()), false);
         return new TestApplication(dataDirectoryLock, store, workspaces, service);
     }
 

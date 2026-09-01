@@ -93,7 +93,7 @@ class WorkspaceToolIsolationTest {
                 new SecretRedactor("test-key"));
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
                 DefaultAgentService.DEFAULT_SYSTEM_PROMPT,
-                new SecretRedactor("test-key"));
+                new SecretRedactor("test-key"), false);
         RunLimits alphaLimits = limits(7, 4_096);
         RunLimits betaLimits = limits(11, 8_192);
         var alphaSession = service.openSession(

@@ -42,6 +42,8 @@ CREATE TABLE turns (
     session_id TEXT NOT NULL,
     turn_no INTEGER NOT NULL
         CHECK (turn_no > 0),
+    thinking_enabled INTEGER NOT NULL
+        CHECK (thinking_enabled IN (0, 1)),
     status TEXT NOT NULL
         CHECK (status IN (
             'CREATED', 'RUNNING', 'STREAMING_MODEL', 'EXECUTING_TOOL',

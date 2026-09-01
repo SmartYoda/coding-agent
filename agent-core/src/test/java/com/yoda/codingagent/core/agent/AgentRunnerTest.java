@@ -15,6 +15,7 @@ import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
+import com.yoda.codingagent.core.api.ThinkingMode;
 import com.yoda.codingagent.core.api.TurnStatus;
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.config.AgentConfig;
@@ -47,6 +48,10 @@ import com.yoda.codingagent.core.workspace.WorkspaceRegistry;
 import com.yoda.codingagent.core.workspace.WorkspaceResolver;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.time.Duration;
 import java.time.Clock;
 import java.time.Instant;
@@ -100,6 +105,55 @@ class AgentRunnerTest {
         for (int index = 0; index < events.size(); index++) {
             assertEquals(index + 1L, events.get(index).sequence());
         }
+    }
+
+    @Test
+    void resolvesThinkingPerTurnAndPersistsTheEffectiveValue(@TempDir Path tempDirectory)
+            throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(
+                List.of(new ModelStreamEvent.ResponseStarted("tool"),
+                        new ModelStreamEvent.ToolCallDelta(
+                                0, "call-1", "test_echo", "{\"value\":\"hello\"}"),
+                        new ModelStreamEvent.ResponseFinished("tool_calls"),
+                        new ModelStreamEvent.StreamEnded()),
+                List.of(new ModelStreamEvent.ResponseStarted("default-final"),
+                        new ModelStreamEvent.TextDelta("default done"),
+                        new ModelStreamEvent.ResponseFinished("stop"),
+                        new ModelStreamEvent.StreamEnded()),
+                List.of(new ModelStreamEvent.ResponseStarted("enabled"),
+                        new ModelStreamEvent.TextDelta("enabled done"),
+                        new ModelStreamEvent.ResponseFinished("stop"),
+                        new ModelStreamEvent.StreamEnded()),
+                List.of(new ModelStreamEvent.ResponseStarted("disabled"),
+                        new ModelStreamEvent.TextDelta("disabled done"),
+                        new ModelStreamEvent.ResponseFinished("stop"),
+                        new ModelStreamEvent.StreamEnded())));
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(echoTool(new AtomicInteger(),
+                        tempDirectory.resolve("workspace")))), true);
+
+        application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("default"), ignored -> { }, CancellationToken.NONE);
+        application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("enabled", ThinkingMode.ENABLED),
+                ignored -> { }, CancellationToken.NONE);
+        application.service().runTurn(application.session().sessionId(),
+                new AgentRequest("disabled", ThinkingMode.DISABLED),
+                ignored -> { }, CancellationToken.NONE);
+
+        assertEquals(List.of(true, true, true, false), model.requests.stream()
+                .map(ModelRequest::thinkingEnabled).toList());
+        List<Integer> persisted = new ArrayList<>();
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + application.config().databasePath());
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery(
+                     "SELECT thinking_enabled FROM turns ORDER BY turn_no")) {
+            while (resultSet.next()) {
+                persisted.add(resultSet.getInt(1));
+            }
+        }
+        assertEquals(List.of(1, 1, 0), persisted);
     }
 
     @Test
@@ -537,7 +591,9 @@ class AgentRunnerTest {
     void retriesTransientModelFailureTwiceWithinOneLogicalStep(
             @TempDir Path tempDirectory) throws Exception {
         AtomicInteger attempts = new AtomicInteger();
+        List<Boolean> thinkingValues = new ArrayList<>();
         ModelClient model = (request, sink, token) -> {
+            thinkingValues.add(request.thinkingEnabled());
             int attempt = attempts.incrementAndGet();
             if (attempt < 3) {
                 throw new AgentException(ErrorCode.MODEL_UNAVAILABLE,
@@ -555,12 +611,14 @@ class AgentRunnerTest {
         List<AgentEvent> events = new ArrayList<>();
 
         AgentResult result = application.service().runTurn(application.session().sessionId(),
-                new AgentRequest("run"), events::add, CancellationToken.NONE);
+                new AgentRequest("run", ThinkingMode.ENABLED),
+                events::add, CancellationToken.NONE);
 
         assertEquals(TurnStatus.COMPLETED, result.status());
         assertEquals(1, result.stepCount());
         assertEquals(3, attempts.get());
         assertEquals(List.of(Duration.ofSeconds(1), Duration.ofSeconds(2)), waits);
+        assertEquals(List.of(true, true, true), thinkingValues);
         assertEquals(1, events.stream()
                 .filter(AgentEvent.ModelRequestStarted.class::isInstance).count());
         assertEquals(2, events.stream()
@@ -822,6 +880,13 @@ class AgentRunnerTest {
     }
 
     private TestApplication application(Path tempDirectory, ModelClient model,
+                                        ToolRegistry tools, boolean defaultThinkingEnabled)
+            throws Exception {
+        return application(tempDirectory, model, tools, null, limits(), null,
+                Clock.systemUTC(), defaultThinkingEnabled);
+    }
+
+    private TestApplication application(Path tempDirectory, ModelClient model,
                                         ToolRegistry tools,
                                         FailingStateStore.FailurePoint failurePoint)
             throws Exception {
@@ -850,6 +915,16 @@ class AgentRunnerTest {
                                         FailingStateStore.FailurePoint failurePoint,
                                         RunLimits runLimits, RetryWaiter retryWaiter,
                                         Clock clock) throws Exception {
+        return application(tempDirectory, model, tools, failurePoint, runLimits, retryWaiter,
+                clock, false);
+    }
+
+    private TestApplication application(Path tempDirectory, ModelClient model,
+                                        ToolRegistry tools,
+                                        FailingStateStore.FailurePoint failurePoint,
+                                        RunLimits runLimits, RetryWaiter retryWaiter,
+                                        Clock clock, boolean defaultThinkingEnabled)
+            throws Exception {
         AgentConfig config = new AgentConfigLoader().load(Map.of(
                 "apiKey", "test-key",
                 "dataDirectory", tempDirectory.resolve("state").toString()), Map.of());
@@ -873,7 +948,8 @@ class AgentRunnerTest {
                 new ModelRetryPolicy(), retryWaiter == null
                 ? RetryWaiter.cancellableSleep() : retryWaiter, clock, redactor);
         DefaultAgentService service = new DefaultAgentService(workspaces, sessions, runner,
-                DefaultAgentService.DEFAULT_SYSTEM_PROMPT, redactor);
+                DefaultAgentService.DEFAULT_SYSTEM_PROMPT, redactor,
+                defaultThinkingEnabled);
         SessionDescriptor session = service.openSession(
                 new SessionConfig(workspace.workspaceId(), runLimits));
         return new TestApplication(config, dataDirectoryLock, store, service, session);

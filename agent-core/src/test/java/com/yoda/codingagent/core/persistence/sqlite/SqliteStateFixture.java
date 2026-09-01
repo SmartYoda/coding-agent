@@ -37,9 +37,9 @@ public final class SqliteStateFixture {
 
             execute(connection, """
                     INSERT INTO turns
-                        (id, session_id, turn_no, status, termination_reason,
+                        (id, session_id, turn_no, thinking_enabled, status, termination_reason,
                          created_at, updated_at, finished_at)
-                    VALUES (?, ?, ?, 'COMPLETED', NULL, ?, ?, ?)
+                    VALUES (?, ?, ?, 0, 'COMPLETED', NULL, ?, ?, ?)
                     """, turnId.value().toString(), sessionId.value().toString(), turnNo,
                     now, now, now);
             execute(connection, """
@@ -125,9 +125,10 @@ public final class SqliteStateFixture {
                 turnIds.add(turnId);
                 execute(connection, """
                         INSERT INTO turns
-                            (id, session_id, turn_no, status, termination_reason,
+                            (id, session_id, turn_no, thinking_enabled, status,
+                             termination_reason,
                              created_at, updated_at, finished_at)
-                        VALUES (?, ?, ?, 'COMPLETED', NULL, ?, ?, ?)
+                        VALUES (?, ?, ?, 0, 'COMPLETED', NULL, ?, ?, ?)
                         """, turnId.value().toString(), sessionId.value().toString(), turnNo++,
                         now, now, now);
                 execute(connection, """
@@ -203,9 +204,9 @@ public final class SqliteStateFixture {
             String stepId = UUID.randomUUID().toString();
             execute(connection, """
                     INSERT INTO turns
-                        (id, session_id, turn_no, status, termination_reason,
+                        (id, session_id, turn_no, thinking_enabled, status, termination_reason,
                          created_at, updated_at, finished_at)
-                    VALUES (?, ?, ?, 'EXECUTING_TOOL', NULL, ?, ?, NULL)
+                    VALUES (?, ?, ?, 0, 'EXECUTING_TOOL', NULL, ?, ?, NULL)
                     """, turnId.value().toString(), sessionId.value().toString(), turnNo,
                     now, now);
             execute(connection, """
@@ -246,9 +247,9 @@ public final class SqliteStateFixture {
                     sessionId.value().toString());
             execute(connection, """
                     INSERT INTO turns
-                        (id, session_id, turn_no, status, termination_reason,
+                        (id, session_id, turn_no, thinking_enabled, status, termination_reason,
                          created_at, updated_at, finished_at)
-                    VALUES (?, ?, ?, ?, NULL, ?, ?, NULL)
+                    VALUES (?, ?, ?, 0, ?, NULL, ?, ?, NULL)
                     """, turnId.value().toString(), sessionId.value().toString(), turnNo,
                     status, now, now);
             int sequence = nextInt(connection,

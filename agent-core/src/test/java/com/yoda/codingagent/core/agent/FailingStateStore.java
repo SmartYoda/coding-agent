@@ -90,9 +90,9 @@ final class FailingStateStore implements StateStore {
 
     @Override
     public void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt,
-                          String userInput) {
+                          String userInput, boolean thinkingEnabled) {
         failAt(FailurePoint.BEGIN_TURN);
-        delegate.beginTurn(turnId, sessionId, startedAt, userInput);
+        delegate.beginTurn(turnId, sessionId, startedAt, userInput, thinkingEnabled);
     }
 
     @Override

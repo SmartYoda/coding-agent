@@ -120,7 +120,8 @@ public final class CliApplication {
                     com.yoda.codingagent.core.model.RetryWaiter.cancellableSleep(),
                     java.time.Clock.systemUTC(), redactor);
             AgentService service = new DefaultAgentService(workspaces, sessions, runner,
-                    DefaultAgentService.DEFAULT_SYSTEM_PROMPT, redactor);
+                    DefaultAgentService.DEFAULT_SYSTEM_PROMPT, redactor,
+                    config.defaultThinkingEnabled());
             return new CliRuntime(service, store.startupRecoverySummary(), dataDirectoryLock);
         } catch (RuntimeException exception) {
             dataDirectoryLock.close();
@@ -172,6 +173,7 @@ public final class CliApplication {
                                 SecretRedactor redactor) {
         ConsoleRenderer renderer = new ConsoleRenderer(output, redactor::redact);
         CliController controller = new CliController(service, config.defaultRunLimits(),
+                config.defaultThinkingEnabled(),
                 workspace, session, renderer, new ContextView(),
                 Executors.newThreadPerTaskExecutor(
                         Thread.ofVirtual().name("coding-agent-turn-", 0).factory()));
@@ -216,14 +218,14 @@ public final class CliApplication {
         output.println("  --session <uuid>              Resume an OPEN session");
         output.println("  --base-url <url>              OpenAI-compatible API base URL");
         output.println("  --model <name>                Model name");
-        output.println("  --enable-thinking <true|false> Enable model thinking mode");
+        output.println("  --enable-thinking <true|false> Default thinking mode per turn");
         output.println("  --data-dir <path>             Agent state directory");
         output.println("  --max-steps <n>               Maximum model steps per turn");
         output.println("  --turn-timeout-seconds <n>    Turn timeout");
         output.println("  --model-timeout-seconds <n>   Model stream timeout");
         output.println("  --command-timeout-seconds <n> Command timeout");
         output.println("  --max-tool-output-chars <n>   Tool result character limit");
-        output.println("  --max-input-tokens <n>        Context input budget");
+        output.println("  --max-input-tokens <n>        Context input budget (default: 131072)");
         output.println("  --reserved-output-tokens <n>  Reserved model output budget");
         output.println("  --recent-full-turns <n>       Full recent turns in context");
         output.println("  --help                        Show this help");

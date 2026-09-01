@@ -19,6 +19,7 @@ import com.yoda.codingagent.core.api.SessionId;
 import com.yoda.codingagent.core.api.SessionStatus;
 import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.api.TurnStatus;
+import com.yoda.codingagent.core.api.ThinkingMode;
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.api.WorkspaceId;
 import com.yoda.codingagent.core.api.WorkspaceStatus;
@@ -52,6 +53,44 @@ class CliControllerTest {
         awaitIdle(fixture.controller());
         assertEquals(1, fixture.service().turnCalls.get());
         assertEquals(2, occurrences(fixture.output(), "coding-agent> "));
+        fixture.controller().handle(new CliCommand.Exit());
+    }
+
+    @Test
+    void thinkingSelectionIsCapturedPerTurnAndDefaultUsesStartupValue() throws Exception {
+        Fixture fixture = fixture(false, true);
+
+        fixture.controller().handle(new CliCommand.ThinkingShow());
+        fixture.controller().handle(new CliCommand.Prompt("default"));
+        awaitIdle(fixture.controller());
+        fixture.controller().handle(new CliCommand.ThinkingSet(ThinkingMode.DISABLED));
+        fixture.controller().handle(new CliCommand.Prompt("off"));
+        awaitIdle(fixture.controller());
+        fixture.controller().handle(new CliCommand.ThinkingSet(ThinkingMode.DEFAULT));
+        fixture.controller().handle(new CliCommand.Prompt("default again"));
+        awaitIdle(fixture.controller());
+
+        assertEquals(List.of(ThinkingMode.DEFAULT, ThinkingMode.DISABLED,
+                        ThinkingMode.DEFAULT),
+                fixture.service().requests.stream().map(AgentRequest::thinkingMode).toList());
+        assertTrue(fixture.output().contains("override=DEFAULT, effective=on"));
+        assertTrue(fixture.output().contains("override=DISABLED, effective=off"));
+        fixture.controller().handle(new CliCommand.Exit());
+    }
+
+    @Test
+    void activeTurnRejectsThinkingChanges() throws Exception {
+        Fixture fixture = fixture(true);
+        fixture.controller().handle(new CliCommand.Prompt("block"));
+        assertTrue(fixture.service().started.await(2, TimeUnit.SECONDS));
+
+        fixture.controller().handle(new CliCommand.ThinkingSet(ThinkingMode.ENABLED));
+        fixture.controller().handle(new CliCommand.Cancel());
+        awaitIdle(fixture.controller());
+
+        assertEquals(ThinkingMode.DEFAULT,
+                fixture.service().requests.getFirst().thinkingMode());
+        assertTrue(fixture.output().contains("A turn is active"));
         fixture.controller().handle(new CliCommand.Exit());
     }
 
@@ -210,11 +249,21 @@ class CliControllerTest {
     }
 
     private static Fixture fixture(boolean blocking) {
-        return fixture(blocking, Executors.newThreadPerTaskExecutor(
+        return fixture(blocking, false, Executors.newThreadPerTaskExecutor(
                 Thread.ofVirtual().factory()));
     }
 
+    private static Fixture fixture(boolean blocking, boolean defaultThinkingEnabled) {
+        return fixture(blocking, defaultThinkingEnabled,
+                Executors.newThreadPerTaskExecutor(Thread.ofVirtual().factory()));
+    }
+
     private static Fixture fixture(boolean blocking, ExecutorService executor) {
+        return fixture(blocking, false, executor);
+    }
+
+    private static Fixture fixture(boolean blocking, boolean defaultThinkingEnabled,
+                                   ExecutorService executor) {
         RunLimits limits = new RunLimits(4, Duration.ofSeconds(30),
                 Duration.ofSeconds(10), Duration.ofSeconds(5),
                 4_096, 8_192, 1_024, 2);
@@ -226,8 +275,8 @@ class CliControllerTest {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         ConsoleRenderer renderer = new ConsoleRenderer(
                 new PrintWriter(bytes, true, StandardCharsets.UTF_8), value -> value);
-        CliController controller = new CliController(service, limits, workspace, session,
-                renderer, new ContextView(), executor);
+        CliController controller = new CliController(service, limits, defaultThinkingEnabled,
+                workspace, session, renderer, new ContextView(), executor);
         return new Fixture(service, renderer, controller, executor, bytes);
     }
 
@@ -276,6 +325,8 @@ class CliControllerTest {
         private final List<WorkspaceDescriptor> workspaces = new ArrayList<>();
         private final List<SessionDescriptor> sessions = new ArrayList<>();
         private final AtomicInteger turnCalls = new AtomicInteger();
+        private final List<AgentRequest> requests = Collections.synchronizedList(
+                new ArrayList<>());
         private final AtomicInteger closeCalls = new AtomicInteger();
         private final CountDownLatch started = new CountDownLatch(1);
         private volatile boolean blocking;
@@ -349,6 +400,7 @@ class CliControllerTest {
                                    AgentEventSink eventSink,
                                    CancellationToken cancellationToken) {
             turnCalls.incrementAndGet();
+            requests.add(request);
             started.countDown();
             while (blocking && (ignoreCancellation || !cancellationToken.isCancelled())) {
                 Thread.onSpinWait();

@@ -469,7 +469,7 @@ public final class SqliteStateStore implements StateStore {
 
     @Override
     public void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt,
-                          String userInput) {
+                          String userInput, boolean thinkingEnabled) {
         Objects.requireNonNull(turnId, "turnId");
         Objects.requireNonNull(sessionId, "sessionId");
         Objects.requireNonNull(startedAt, "startedAt");
@@ -494,15 +494,16 @@ public final class SqliteStateStore implements StateStore {
             long now = startedAt.toEpochMilli();
             try (PreparedStatement statement = connection.prepareStatement("""
                     INSERT INTO turns
-                        (id, session_id, turn_no, status, termination_reason,
+                        (id, session_id, turn_no, thinking_enabled, status, termination_reason,
                          created_at, updated_at, finished_at)
-                    VALUES (?, ?, ?, 'RUNNING', NULL, ?, ?, NULL)
+                    VALUES (?, ?, ?, ?, 'RUNNING', NULL, ?, ?, NULL)
                     """)) {
                 statement.setString(1, turnId.value().toString());
                 statement.setString(2, sessionId.value().toString());
                 statement.setInt(3, turnNo);
-                statement.setLong(4, now);
+                statement.setInt(4, thinkingEnabled ? 1 : 0);
                 statement.setLong(5, now);
+                statement.setLong(6, now);
                 requireOneRow(statement.executeUpdate(), "begin turn");
             }
             insertMessage(connection, sessionId, turnId, null, null,

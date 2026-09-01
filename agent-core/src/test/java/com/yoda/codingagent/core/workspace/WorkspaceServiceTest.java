@@ -127,7 +127,7 @@ class WorkspaceServiceTest {
                 new SecretRedactor(config.apiKey()));
         return new TestApplication(config, dataDirectoryLock, registry, new DefaultAgentService(
                 registry, sessionRegistry, runner, DefaultAgentService.DEFAULT_SYSTEM_PROMPT,
-                new SecretRedactor(config.apiKey())));
+                new SecretRedactor(config.apiKey()), false));
     }
 
     private record TestApplication(

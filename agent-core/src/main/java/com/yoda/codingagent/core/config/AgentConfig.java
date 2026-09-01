@@ -14,25 +14,25 @@ public final class AgentConfig {
     private final Duration modelTimeout;
     private final int maxSseEventBytes;
     private final int maxResponseCharacters;
-    private final boolean thinkingEnabled;
+    private final boolean defaultThinkingEnabled;
     private final Path dataDirectory;
     private final Duration databaseBusyTimeout;
     private final RunLimits defaultRunLimits;
 
     public AgentConfig(URI baseUrl, String apiKey, String model, Duration modelTimeout,
                        int maxSseEventBytes, int maxResponseCharacters,
-                       boolean thinkingEnabled, Path dataDirectory,
+                       boolean defaultThinkingEnabled, Path dataDirectory,
                        Duration databaseBusyTimeout) {
         this(baseUrl, apiKey, model, modelTimeout, maxSseEventBytes,
-                maxResponseCharacters, thinkingEnabled, dataDirectory,
+                maxResponseCharacters, defaultThinkingEnabled, dataDirectory,
                 databaseBusyTimeout, new RunLimits(20, Duration.ofSeconds(900),
                         modelTimeout, Duration.ofSeconds(30), 20_000,
-                        65_536, 8_192, 4));
+                        131_072, 8_192, 4));
     }
 
     public AgentConfig(URI baseUrl, String apiKey, String model, Duration modelTimeout,
                        int maxSseEventBytes, int maxResponseCharacters,
-                       boolean thinkingEnabled, Path dataDirectory,
+                       boolean defaultThinkingEnabled, Path dataDirectory,
                        Duration databaseBusyTimeout, RunLimits defaultRunLimits) {
         this.baseUrl = requireSupportedBaseUrl(baseUrl);
         this.apiKey = requireText(apiKey, "apiKey");
@@ -45,7 +45,7 @@ public final class AgentConfig {
                 "maxSseEventBytes", 1_024, 4_194_304);
         this.maxResponseCharacters = requireRange(maxResponseCharacters,
                 "maxResponseCharacters", 1_024, 16_777_216);
-        this.thinkingEnabled = thinkingEnabled;
+        this.defaultThinkingEnabled = defaultThinkingEnabled;
         this.dataDirectory = requireAbsolutePath(dataDirectory, "dataDirectory");
         this.databaseBusyTimeout = requireRange(databaseBusyTimeout,
                 "databaseBusyTimeout", Duration.ofMillis(1), Duration.ofSeconds(60));
@@ -68,7 +68,7 @@ public final class AgentConfig {
 
     public int maxResponseCharacters() { return maxResponseCharacters; }
 
-    public boolean thinkingEnabled() { return thinkingEnabled; }
+    public boolean defaultThinkingEnabled() { return defaultThinkingEnabled; }
 
     public Path dataDirectory() { return dataDirectory; }
 
@@ -84,7 +84,7 @@ public final class AgentConfig {
                 + ", modelTimeout=" + modelTimeout
                 + ", maxSseEventBytes=" + maxSseEventBytes
                 + ", maxResponseCharacters=" + maxResponseCharacters
-                + ", thinkingEnabled=" + thinkingEnabled
+                + ", defaultThinkingEnabled=" + defaultThinkingEnabled
                 + ", dataDirectory=" + dataDirectory
                 + ", databaseBusyTimeout=" + databaseBusyTimeout + "]";
     }

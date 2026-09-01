@@ -7,7 +7,7 @@ import java.util.Objects;
 
 public record ModelRequest(String model, List<Message> messages,
                            List<ToolDefinition> tools, Duration timeout,
-                           int maxOutputTokens) {
+                           int maxOutputTokens, boolean thinkingEnabled) {
 
     public ModelRequest {
         if (model == null || model.isBlank()) {

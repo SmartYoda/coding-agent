@@ -74,9 +74,20 @@ class SchemaMigrationTest {
             insertSession(connection, "session-1", "workspace-1");
             assertRejected(connection, """
                     INSERT INTO turns
-                        (id, session_id, turn_no, status, termination_reason,
+                        (id, session_id, turn_no, thinking_enabled, status,
+                         created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'RUNNING', ?, ?)
+                    """, "bad-thinking", "session-1", 1, 2, NOW, NOW);
+            assertRejected(connection, """
+                    INSERT INTO turns
+                        (id, session_id, turn_no, status, created_at, updated_at)
+                    VALUES (?, ?, ?, 'RUNNING', ?, ?)
+                    """, "missing-thinking", "session-1", 1, NOW, NOW);
+            assertRejected(connection, """
+                    INSERT INTO turns
+                        (id, session_id, turn_no, thinking_enabled, status, termination_reason,
                          created_at, updated_at, finished_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)
                     """, "bad-turn", "session-1", 1, "STOPPED", null, NOW, NOW, null);
 
             insertTurn(connection, "turn-1", "session-1", 1);
@@ -241,9 +252,10 @@ class SchemaMigrationTest {
                 Long finishedAt = terminal ? NOW : null;
                 execute(connection, """
                         INSERT INTO turns
-                            (id, session_id, turn_no, status, termination_reason,
+                            (id, session_id, turn_no, thinking_enabled, status,
+                             termination_reason,
                              created_at, updated_at, finished_at)
-                        VALUES (?, 'session-main', ?, ?, ?, ?, ?, ?)
+                        VALUES (?, 'session-main', ?, 0, ?, ?, ?, ?, ?)
                         """, "turn-status-" + status.name(), turnNo++, status.name(), reason,
                         NOW, NOW, finishedAt);
             }
@@ -381,8 +393,9 @@ class SchemaMigrationTest {
             throws SQLException {
         execute(connection, """
                 INSERT INTO turns
-                    (id, session_id, turn_no, status, created_at, updated_at)
-                VALUES (?, ?, ?, 'RUNNING', ?, ?)
+                    (id, session_id, turn_no, thinking_enabled, status,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, 0, 'RUNNING', ?, ?)
                 """, id, sessionId, turnNo, NOW, NOW);
     }
 

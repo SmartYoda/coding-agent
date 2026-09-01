@@ -89,18 +89,20 @@ public final class AgentRunner {
         this.stopPolicy = new StopPolicy(clock);
     }
 
-    AgentResult run(AgentSession session, AgentRequest request,
+    AgentResult run(AgentSession session, AgentRequest request, boolean thinkingEnabled,
                     AgentEventSink eventSink, CancellationToken cancellationToken) {
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(cancellationToken, "cancellationToken");
-        AgentTurn turn = new AgentTurn(TurnId.random(), session.sessionId(), clock.instant());
+        AgentTurn turn = new AgentTurn(TurnId.random(), session.sessionId(), clock.instant(),
+                thinkingEnabled);
         EventEmitter events = new EventEmitter(session.workspace().workspaceId(),
                 session.sessionId(), turn.turnId(),
                 Objects.requireNonNull(eventSink, "eventSink"), clock);
         boolean began = false;
         try {
-            stateStore.beginTurn(turn.turnId(), turn.sessionId(), turn.startedAt(), request.input());
+            stateStore.beginTurn(turn.turnId(), turn.sessionId(), turn.startedAt(),
+                    request.input(), turn.thinkingEnabled());
             began = true;
             events.turnStarted();
             CanonicalHistory history = stateStore.loadCanonicalHistory(session.sessionId());
@@ -252,7 +254,8 @@ public final class AgentRunner {
             try {
                 modelClient.stream(new ModelRequest(model, snapshot.messages(),
                                 toolDispatcher.definitions(), remaining,
-                                session.limits().reservedOutputTokens()), event -> {
+                                session.limits().reservedOutputTokens(),
+                                turn.thinkingEnabled()), event -> {
                             if (isSemanticDelta(event)) {
                                 semanticDeltaSeen[0] = true;
                             }

@@ -107,9 +107,10 @@ class OpenAiCompatibleChatModelClientTest {
                     """);
         });
         OpenAiCompatibleChatModelClient client = new OpenAiCompatibleChatModelClient(
-                config("test-secret", true), HttpClient.newHttpClient(), objectMapper);
+                config("test-secret", false), HttpClient.newHttpClient(), objectMapper);
 
-        client.stream(request(), new ModelResponseAccumulator(objectMapper, 4096),
+        client.stream(request(Duration.ofSeconds(10), true),
+                new ModelResponseAccumulator(objectMapper, 4096),
                 CancellationToken.NONE);
 
         assertTrue(capturedBody.get().get("enable_thinking").asBoolean());
@@ -143,7 +144,7 @@ class OpenAiCompatibleChatModelClientTest {
                 new Message.UserMessage(currentTurn, "read it"),
                 new Message.AssistantToolCallsMessage(currentTurn, "", List.of(call)),
                 new Message.ToolResultMessage(currentTurn, call.callId(), failure)),
-                List.of(), Duration.ofSeconds(10), 1024);
+                List.of(), Duration.ofSeconds(10), 1024, true);
 
         client.stream(request, ignored -> { }, CancellationToken.NONE);
 
@@ -302,6 +303,10 @@ class OpenAiCompatibleChatModelClientTest {
     }
 
     private ModelRequest request(Duration timeout) {
+        return request(timeout, false);
+    }
+
+    private ModelRequest request(Duration timeout, boolean thinkingEnabled) {
         ObjectNode schema = objectMapper.createObjectNode();
         schema.put("type", "object");
         schema.putObject("properties").putObject("path").put("type", "string");
@@ -309,7 +314,7 @@ class OpenAiCompatibleChatModelClientTest {
         return new ModelRequest("qwen3.8-flash",
                 List.of(new Message.UserMessage(TurnId.random(), "读取 pom.xml")),
                 List.of(new ToolDefinition("read_file", "Read one workspace file", schema)),
-                timeout, 1024);
+                timeout, 1024, thinkingEnabled);
     }
 
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {

@@ -17,7 +17,7 @@ public record RunLimits(
     public static final int MAX_RECENT_FULL_TURNS = 32;
     public static final RunLimits DEFAULTS = new RunLimits(
             20, Duration.ofSeconds(900), Duration.ofSeconds(120),
-            Duration.ofSeconds(30), 20_000, 65_536, 8_192, 4);
+            Duration.ofSeconds(30), 20_000, 131_072, 8_192, 4);
 
     public RunLimits {
         if (maxSteps < 1 || maxSteps > 100) {

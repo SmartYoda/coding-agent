@@ -20,6 +20,17 @@ class AgentApiContractTest {
     private final TurnId turnId = TurnId.random();
 
     @Test
+    void thinkingModeUsesDefaultUnlessExplicitlyOverridden() {
+        assertEquals(ThinkingMode.DEFAULT, new AgentRequest("task").thinkingMode());
+        assertEquals(true, ThinkingMode.DEFAULT.resolve(true));
+        assertEquals(false, ThinkingMode.DEFAULT.resolve(false));
+        assertEquals(true, ThinkingMode.ENABLED.resolve(false));
+        assertEquals(false, ThinkingMode.DISABLED.resolve(true));
+        assertThrows(NullPointerException.class,
+                () -> new AgentRequest("task", null));
+    }
+
+    @Test
     void completedAndFailedResultsEnforceTerminalPayloadAndMetrics() {
         AgentResult completed = AgentResult.completed(workspaceId, sessionId, turnId,
                 "done", 2, 3, Duration.ofSeconds(4));
