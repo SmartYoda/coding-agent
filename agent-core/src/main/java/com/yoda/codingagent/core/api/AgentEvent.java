@@ -9,6 +9,7 @@ public sealed interface AgentEvent permits AgentEvent.TurnStarted,
         AgentEvent.ModelRequestStarted, AgentEvent.ModelTextDelta,
         AgentEvent.ModelToolCallDelta, AgentEvent.ModelRequestCompleted,
         AgentEvent.RetryScheduled, AgentEvent.ToolStarted, AgentEvent.ToolCompleted,
+        AgentEvent.CommandApprovalRequested, AgentEvent.CommandApprovalResolved,
         AgentEvent.ContextBudgetEvaluated, AgentEvent.ContextCompacted,
         AgentEvent.TurnDigestCreated, AgentEvent.TurnCompleted,
         AgentEvent.TurnFailed, AgentEvent.TurnCancelled,
@@ -86,21 +87,64 @@ public sealed interface AgentEvent permits AgentEvent.TurnStarted,
 
     record ToolStarted(WorkspaceId workspaceId, SessionId sessionId, TurnId turnId,
                        long sequence, Instant timestamp, String callId,
-                       String toolName) implements AgentEvent {
+                       String toolName, String detail) implements AgentEvent {
         public ToolStarted {
             validate(workspaceId, sessionId, turnId, sequence, timestamp);
             requireText(callId, "callId");
             requireText(toolName, "toolName");
+            detail = requireToolDetail(detail);
+        }
+
+        public ToolStarted(WorkspaceId workspaceId, SessionId sessionId, TurnId turnId,
+                           long sequence, Instant timestamp, String callId,
+                           String toolName) {
+            this(workspaceId, sessionId, turnId, sequence, timestamp,
+                    callId, toolName, "");
         }
     }
 
     record ToolCompleted(WorkspaceId workspaceId, SessionId sessionId, TurnId turnId,
                          long sequence, Instant timestamp, String callId,
-                         String toolName, boolean success) implements AgentEvent {
+                         String toolName, String detail, boolean success) implements AgentEvent {
         public ToolCompleted {
             validate(workspaceId, sessionId, turnId, sequence, timestamp);
             requireText(callId, "callId");
             requireText(toolName, "toolName");
+            detail = requireToolDetail(detail);
+        }
+
+        public ToolCompleted(WorkspaceId workspaceId, SessionId sessionId, TurnId turnId,
+                             long sequence, Instant timestamp, String callId,
+                             String toolName, boolean success) {
+            this(workspaceId, sessionId, turnId, sequence, timestamp,
+                    callId, toolName, "", success);
+        }
+    }
+
+    record CommandApprovalRequested(
+            WorkspaceId workspaceId, SessionId sessionId, TurnId turnId,
+            long sequence, Instant timestamp, String approvalId, String callId,
+            List<String> argv, String cwd) implements AgentEvent {
+        public CommandApprovalRequested {
+            validate(workspaceId, sessionId, turnId, sequence, timestamp);
+            requireText(approvalId, "approvalId");
+            requireText(callId, "callId");
+            argv = List.copyOf(Objects.requireNonNull(argv, "argv"));
+            if (argv.isEmpty() || argv.stream().anyMatch(value -> value == null || value.isEmpty())) {
+                throw new IllegalArgumentException("argv must contain non-empty values");
+            }
+            requireText(cwd, "cwd");
+        }
+    }
+
+    record CommandApprovalResolved(
+            WorkspaceId workspaceId, SessionId sessionId, TurnId turnId,
+            long sequence, Instant timestamp, String approvalId,
+            CommandApprovalDecision decision) implements AgentEvent {
+        public CommandApprovalResolved {
+            validate(workspaceId, sessionId, turnId, sequence, timestamp);
+            requireText(approvalId, "approvalId");
+            Objects.requireNonNull(decision, "decision");
         }
     }
 
@@ -225,6 +269,15 @@ public sealed interface AgentEvent permits AgentEvent.TurnStarted,
     private static String requireText(String value, String name) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(name + " must not be blank");
+        }
+        return value;
+    }
+
+    private static String requireToolDetail(String value) {
+        Objects.requireNonNull(value, "detail");
+        if (value.length() > 120 || value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0) {
+            throw new IllegalArgumentException(
+                    "detail must be a single line of at most 120 characters");
         }
         return value;
     }

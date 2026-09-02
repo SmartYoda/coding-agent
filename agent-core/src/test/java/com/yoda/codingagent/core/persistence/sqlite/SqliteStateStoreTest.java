@@ -6,6 +6,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.yoda.codingagent.core.api.ErrorCode;
+import com.yoda.codingagent.core.api.CommandAccessMode;
+import com.yoda.codingagent.core.api.RunLimits;
+import com.yoda.codingagent.core.api.SessionConfig;
+import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
 import com.yoda.codingagent.core.api.WorkspaceId;
 import com.yoda.codingagent.core.api.WorkspaceStatus;
@@ -18,6 +22,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -90,6 +95,32 @@ class SqliteStateStoreTest {
                 .map(WorkspaceDescriptor::displayName)
                 .collect(java.util.stream.Collectors.toSet()));
         assertEquals(WorkspaceStatus.ACTIVE, second.status());
+    }
+
+    @Test
+    void persistsTheCommandAccessModeCapturedForATurn(@TempDir Path tempDirectory)
+            throws Exception {
+        AgentConfig config = config(tempDirectory.resolve("state"), 5000);
+        SqliteStateStore store = open(config);
+        WorkspaceDescriptor workspace = store.registerWorkspace("Workspace",
+                tempDirectory.resolve("workspace"));
+        var session = store.createSessionWithSystemMessage(
+                new SessionConfig(workspace.workspaceId(), RunLimits.DEFAULTS), "system");
+        TurnId turnId = TurnId.random();
+
+        store.beginTurn(turnId, session.sessionId(), Instant.now(), "task", false,
+                CommandAccessMode.ASK);
+
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + config.databasePath());
+             var statement = connection.prepareStatement(
+                     "SELECT command_access_mode FROM turns WHERE id = ?")) {
+            statement.setString(1, turnId.value().toString());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                assertTrue(resultSet.next());
+                assertEquals("ASK", resultSet.getString(1));
+            }
+        }
     }
 
     private static AgentConfig config(Path dataDirectory, int busyTimeoutMillis) {

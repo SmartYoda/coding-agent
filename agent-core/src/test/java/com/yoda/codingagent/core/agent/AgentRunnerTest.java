@@ -11,6 +11,8 @@ import com.yoda.codingagent.core.api.AgentEvent;
 import com.yoda.codingagent.core.api.AgentRequest;
 import com.yoda.codingagent.core.api.AgentResult;
 import com.yoda.codingagent.core.api.CancellationToken;
+import com.yoda.codingagent.core.api.CommandAccessMode;
+import com.yoda.codingagent.core.api.CommandApprovalDecision;
 import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionConfig;
@@ -44,6 +46,8 @@ import com.yoda.codingagent.core.tool.ToolDispatcher;
 import com.yoda.codingagent.core.tool.ToolOutputTruncator;
 import com.yoda.codingagent.core.tool.ToolRegistry;
 import com.yoda.codingagent.core.tool.ToolResult;
+import com.yoda.codingagent.core.tool.builtin.ExecuteCommandTool;
+import com.yoda.codingagent.core.tool.process.CommandResult;
 import com.yoda.codingagent.core.workspace.WorkspaceRegistry;
 import com.yoda.codingagent.core.workspace.WorkspaceResolver;
 import java.nio.file.Files;
@@ -104,6 +108,59 @@ class AgentRunnerTest {
         assertTrue(events.stream().anyMatch(AgentEvent.ModelTextDelta.class::isInstance));
         for (int index = 0; index < events.size(); index++) {
             assertEquals(index + 1L, events.get(index).sequence());
+        }
+    }
+
+    @Test
+    void askModeEmitsApprovalEventsAndPersistsTheCapturedMode(@TempDir Path tempDirectory)
+            throws Exception {
+        ScriptedModelClient model = new ScriptedModelClient(List.of(
+                List.of(new ModelStreamEvent.ResponseStarted("one"),
+                        new ModelStreamEvent.ToolCallDelta(0, "approval-call",
+                                "execute_command",
+                                "{\"argv\":[\"curl\",\"https://example.com\"]}"),
+                        new ModelStreamEvent.ResponseFinished("tool_calls"),
+                        new ModelStreamEvent.StreamEnded()),
+                List.of(new ModelStreamEvent.ResponseStarted("two"),
+                        new ModelStreamEvent.TextDelta("approved"),
+                        new ModelStreamEvent.ResponseFinished("stop"),
+                        new ModelStreamEvent.StreamEnded())));
+        AtomicInteger executions = new AtomicInteger();
+        ExecuteCommandTool commandTool = new ExecuteCommandTool(
+                tempDirectory.resolve("state"),
+                (argv, cwd, timeout, maximumBytes, token) -> {
+                    executions.incrementAndGet();
+                    return new CommandResult(0, "ok", "", Duration.ofMillis(1),
+                            false, false, false, null);
+                });
+        TestApplication application = application(tempDirectory, model,
+                new ToolRegistry(List.of(commandTool)));
+        List<AgentEvent> events = new ArrayList<>();
+
+        AgentResult result = application.service().runTurn(
+                application.session().sessionId(),
+                new AgentRequest("download", ThinkingMode.DEFAULT, CommandAccessMode.ASK),
+                events::add, CancellationToken.NONE,
+                (request, token) -> CommandApprovalDecision.APPROVED);
+
+        assertEquals(TurnStatus.COMPLETED, result.status());
+        assertEquals(1, executions.get());
+        assertTrue(events.stream().anyMatch(event ->
+                event instanceof AgentEvent.CommandApprovalRequested requested
+                        && requested.callId().equals("approval-call")
+                        && !requested.approvalId().equals(requested.callId())));
+        assertTrue(events.stream().anyMatch(event ->
+                event instanceof AgentEvent.CommandApprovalResolved resolved
+                        && resolved.decision() == CommandApprovalDecision.APPROVED));
+        try (Connection connection = DriverManager.getConnection(
+                "jdbc:sqlite:" + application.config().databasePath());
+             var statement = connection.prepareStatement(
+                     "SELECT command_access_mode FROM turns WHERE id = ?")) {
+            statement.setString(1, result.turnId().value().toString());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                assertTrue(resultSet.next());
+                assertEquals("ASK", resultSet.getString(1));
+            }
         }
     }
 

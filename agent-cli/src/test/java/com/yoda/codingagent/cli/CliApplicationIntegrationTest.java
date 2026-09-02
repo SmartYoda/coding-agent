@@ -292,6 +292,11 @@ class CliApplicationIntegrationTest {
         assertTrue(help.contains("Usage:"));
         assertTrue(help.contains("Default thinking mode per turn"));
         assertTrue(help.contains("Context input budget (default: 131072)"));
+        assertTrue(help.contains("Interactive commands (after startup):"));
+        assertTrue(help.contains("/thinking [on|off|default]"));
+        assertTrue(help.contains("/access [restricted|ask|full]"));
+        assertTrue(help.contains("/approve <id>"));
+        assertTrue(help.contains("/deny <id>"));
     }
 
     @Test

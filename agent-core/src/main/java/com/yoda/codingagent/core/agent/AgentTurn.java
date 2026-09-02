@@ -1,6 +1,7 @@
 package com.yoda.codingagent.core.agent;
 
 import com.yoda.codingagent.core.api.ErrorCode;
+import com.yoda.codingagent.core.api.CommandAccessMode;
 import com.yoda.codingagent.core.api.SessionId;
 import com.yoda.codingagent.core.api.TurnId;
 import com.yoda.codingagent.core.api.TurnStatus;
@@ -18,6 +19,7 @@ public final class AgentTurn {
     private final SessionId sessionId;
     private final Instant startedAt;
     private final boolean thinkingEnabled;
+    private final CommandAccessMode commandAccessMode;
     private final Set<String> acceptedToolCallIds = new HashSet<>();
     private int stepCount;
     private int toolCallCount;
@@ -25,10 +27,16 @@ public final class AgentTurn {
 
     public AgentTurn(TurnId turnId, SessionId sessionId, Instant startedAt,
                      boolean thinkingEnabled) {
+        this(turnId, sessionId, startedAt, thinkingEnabled, CommandAccessMode.RESTRICTED);
+    }
+
+    public AgentTurn(TurnId turnId, SessionId sessionId, Instant startedAt,
+                     boolean thinkingEnabled, CommandAccessMode commandAccessMode) {
         this.turnId = Objects.requireNonNull(turnId, "turnId");
         this.sessionId = Objects.requireNonNull(sessionId, "sessionId");
         this.startedAt = Objects.requireNonNull(startedAt, "startedAt");
         this.thinkingEnabled = thinkingEnabled;
+        this.commandAccessMode = Objects.requireNonNull(commandAccessMode, "commandAccessMode");
     }
 
     public TurnId turnId() { return turnId; }
@@ -38,6 +46,8 @@ public final class AgentTurn {
     public Instant startedAt() { return startedAt; }
 
     public boolean thinkingEnabled() { return thinkingEnabled; }
+
+    public CommandAccessMode commandAccessMode() { return commandAccessMode; }
 
     public int stepCount() { return stepCount; }
 

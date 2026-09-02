@@ -1,6 +1,7 @@
 package com.yoda.codingagent.cli;
 
 import com.yoda.codingagent.core.api.SessionId;
+import com.yoda.codingagent.core.api.CommandAccessMode;
 import com.yoda.codingagent.core.api.ThinkingMode;
 import com.yoda.codingagent.core.api.WorkspaceId;
 import java.nio.file.Path;
@@ -11,7 +12,8 @@ sealed interface CliCommand permits CliCommand.Prompt, CliCommand.Help, CliComma
         CliCommand.Cancel, CliCommand.Context, CliCommand.WorkspaceList,
         CliCommand.WorkspaceAdd, CliCommand.WorkspaceUse, CliCommand.WorkspaceArchive,
         CliCommand.SessionList, CliCommand.SessionNew, CliCommand.SessionUse,
-        CliCommand.SessionClose, CliCommand.ThinkingShow, CliCommand.ThinkingSet {
+        CliCommand.SessionClose, CliCommand.ThinkingShow, CliCommand.ThinkingSet,
+        CliCommand.AccessShow, CliCommand.AccessSet, CliCommand.Approve, CliCommand.Deny {
 
     static CliCommand parse(String input) {
         if (input == null) {
@@ -32,10 +34,38 @@ sealed interface CliCommand permits CliCommand.Prompt, CliCommand.Help, CliComma
             case "/cancel" -> requireArity(parts, 1, new Cancel());
             case "/context" -> requireArity(parts, 1, new Context());
             case "/thinking" -> parseThinking(parts);
+            case "/access" -> parseAccess(parts);
+            case "/approve" -> parseApproval(parts, true);
+            case "/deny" -> parseApproval(parts, false);
             case "/workspace" -> parseWorkspace(parts);
             case "/session" -> parseSession(parts);
             default -> throw new IllegalArgumentException("unknown command: " + parts[0]);
         };
+    }
+
+    private static CliCommand parseAccess(String[] parts) {
+        if (parts.length == 1) {
+            return new AccessShow();
+        }
+        if (parts.length != 2) {
+            throw new IllegalArgumentException("usage: /access [restricted|ask|full]");
+        }
+        CommandAccessMode mode = switch (parts[1].toLowerCase(Locale.ROOT)) {
+            case "restricted" -> CommandAccessMode.RESTRICTED;
+            case "ask" -> CommandAccessMode.ASK;
+            case "full" -> CommandAccessMode.FULL_ACCESS;
+            default -> throw new IllegalArgumentException(
+                    "usage: /access [restricted|ask|full]");
+        };
+        return new AccessSet(mode);
+    }
+
+    private static CliCommand parseApproval(String[] parts, boolean approve) {
+        if (parts.length != 2) {
+            throw new IllegalArgumentException(
+                    "usage: /" + (approve ? "approve" : "deny") + " <approval-id>");
+        }
+        return approve ? new Approve(parts[1]) : new Deny(parts[1]);
     }
 
     private static CliCommand parseThinking(String[] parts) {
@@ -138,6 +168,14 @@ sealed interface CliCommand permits CliCommand.Prompt, CliCommand.Help, CliComma
             java.util.Objects.requireNonNull(mode, "mode");
         }
     }
+    record AccessShow() implements CliCommand { }
+    record AccessSet(CommandAccessMode mode) implements CliCommand {
+        public AccessSet {
+            java.util.Objects.requireNonNull(mode, "mode");
+        }
+    }
+    record Approve(String approvalId) implements CliCommand { }
+    record Deny(String approvalId) implements CliCommand { }
     record WorkspaceList() implements CliCommand { }
     record WorkspaceAdd(String name, Path path) implements CliCommand { }
     record WorkspaceUse(WorkspaceId workspaceId) implements CliCommand { }

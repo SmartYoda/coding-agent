@@ -21,8 +21,11 @@ class PackagedCliSmokeIT {
         Process help = new ProcessBuilder(java, "-jar", jar.toString(), "--help")
                 .redirectErrorStream(true).start();
         assertTrue(help.waitFor(10, TimeUnit.SECONDS));
-        assertEquals(0, help.exitValue(), new String(help.getInputStream().readAllBytes(),
-                StandardCharsets.UTF_8));
+        String helpOutput = new String(help.getInputStream().readAllBytes(),
+                StandardCharsets.UTF_8);
+        assertEquals(0, help.exitValue(), helpOutput);
+        assertTrue(helpOutput.contains("/access [restricted|ask|full]"));
+        assertTrue(helpOutput.contains("/approve <id>"));
 
         Path workspace = Files.createDirectory(temp.resolve("workspace"));
         Path state = temp.resolve("state");

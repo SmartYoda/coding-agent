@@ -6,6 +6,9 @@ import com.yoda.codingagent.core.api.AgentEventSink;
 import com.yoda.codingagent.core.api.AgentRequest;
 import com.yoda.codingagent.core.api.AgentResult;
 import com.yoda.codingagent.core.api.CancellationToken;
+import com.yoda.codingagent.core.api.CommandApprovalDecision;
+import com.yoda.codingagent.core.api.CommandApprovalGateway;
+import com.yoda.codingagent.core.api.CommandApprovalRequest;
 import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.SessionId;
 import com.yoda.codingagent.core.api.TurnId;
@@ -91,18 +94,25 @@ public final class AgentRunner {
 
     AgentResult run(AgentSession session, AgentRequest request, boolean thinkingEnabled,
                     AgentEventSink eventSink, CancellationToken cancellationToken) {
+        return run(session, request, thinkingEnabled, eventSink, cancellationToken,
+                CommandApprovalGateway.denyAll());
+    }
+
+    AgentResult run(AgentSession session, AgentRequest request, boolean thinkingEnabled,
+                    AgentEventSink eventSink, CancellationToken cancellationToken,
+                    CommandApprovalGateway approvalGateway) {
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(cancellationToken, "cancellationToken");
         AgentTurn turn = new AgentTurn(TurnId.random(), session.sessionId(), clock.instant(),
-                thinkingEnabled);
+                thinkingEnabled, request.commandAccessMode());
         EventEmitter events = new EventEmitter(session.workspace().workspaceId(),
                 session.sessionId(), turn.turnId(),
                 Objects.requireNonNull(eventSink, "eventSink"), clock);
         boolean began = false;
         try {
             stateStore.beginTurn(turn.turnId(), turn.sessionId(), turn.startedAt(),
-                    request.input(), turn.thinkingEnabled());
+                    request.input(), turn.thinkingEnabled(), turn.commandAccessMode());
             began = true;
             events.turnStarted();
             CanonicalHistory history = stateStore.loadCanonicalHistory(session.sessionId());
@@ -171,7 +181,8 @@ public final class AgentRunner {
                     stateStore.markToolExecuting(step, call);
                     finishIfStopped(turn, session, cancellationToken, false);
                     turn.beginToolCall();
-                    ToolResult result = executeTool(call, session, turn, cancellationToken, events);
+                    ToolResult result = executeTool(call, session, turn, cancellationToken,
+                            approvalGateway, events);
                     stateStore.recordToolResult(step, call, result);
                     resultMessages.add(new Message.ToolResultMessage(
                             turn.turnId(), call.callId(), result));
@@ -300,14 +311,30 @@ public final class AgentRunner {
     }
 
     private ToolResult executeTool(ToolCall call, AgentSession session, AgentTurn turn,
-                                   CancellationToken cancellationToken, EventEmitter events) {
-        events.toolStarted(call.callId(), call.name());
+                                   CancellationToken cancellationToken,
+                                   CommandApprovalGateway approvalGateway,
+                                   EventEmitter events) {
+        String detail = ToolEventDetailFactory.create(call, secretRedactor::redact);
+        events.toolStarted(call.callId(), call.name(), detail);
+        CommandApprovalGateway observedGateway = (request, token) -> {
+            CommandApprovalRequest safeRequest = new CommandApprovalRequest(
+                    request.approvalId(), request.workspaceId(), request.turnId(),
+                    request.callId(), request.argv().stream().map(secretRedactor::redact).toList(),
+                    request.cwd(), request.deadline());
+            events.commandApprovalRequested(safeRequest);
+            CommandApprovalDecision decision = Objects.requireNonNull(
+                    approvalGateway.requestApproval(safeRequest, token),
+                    "approval decision");
+            events.commandApprovalResolved(safeRequest.approvalId(), decision);
+            return decision;
+        };
         ToolResult result = toolDispatcher.dispatch(call,
                 new ToolContext(session.workspace().workspaceId(),
                         session.workspace().root(), turn.turnId(), call.callId(),
                         turn.startedAt().plus(session.limits().turnTimeout()),
-                        session.limits(), cancellationToken));
-        events.toolCompleted(call.callId(), call.name(), result.success());
+                        session.limits(), cancellationToken, turn.commandAccessMode(),
+                        observedGateway));
+        events.toolCompleted(call.callId(), call.name(), detail, result.success());
         return result;
     }
 
@@ -436,14 +463,27 @@ public final class AgentRunner {
                     next(), now(), nextAttempt, maxAttempts, delay.toMillis(), errorCode));
         }
 
-        private void toolStarted(String callId, String toolName) {
+        private void toolStarted(String callId, String toolName, String detail) {
             emit(new AgentEvent.ToolStarted(workspaceId, sessionId, turnId,
-                    next(), now(), callId, toolName));
+                    next(), now(), callId, toolName, detail));
         }
 
-        private void toolCompleted(String callId, String toolName, boolean success) {
+        private void toolCompleted(String callId, String toolName, String detail,
+                                   boolean success) {
             emit(new AgentEvent.ToolCompleted(workspaceId, sessionId, turnId,
-                    next(), now(), callId, toolName, success));
+                    next(), now(), callId, toolName, detail, success));
+        }
+
+        private void commandApprovalRequested(CommandApprovalRequest request) {
+            emit(new AgentEvent.CommandApprovalRequested(
+                    workspaceId, sessionId, turnId, next(), now(), request.approvalId(),
+                    request.callId(), request.argv(), request.cwd().toString()));
+        }
+
+        private void commandApprovalResolved(String approvalId,
+                                               CommandApprovalDecision decision) {
+            emit(new AgentEvent.CommandApprovalResolved(
+                    workspaceId, sessionId, turnId, next(), now(), approvalId, decision));
         }
 
         private void contextBudgetEvaluated(ContextSnapshot.Budget budget) {

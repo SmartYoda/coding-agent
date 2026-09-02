@@ -237,6 +237,10 @@ public final class CliApplication {
         output.println("  --reserved-output-tokens <n>  Reserved model output budget");
         output.println("  --recent-full-turns <n>       Full recent turns in context");
         output.println("  --help                        Show this help");
+        output.println();
+        output.println("Interactive commands (after startup):");
+        CliController.helpText().lines()
+                .forEach(line -> output.println("  " + line));
     }
 
     private static void printError(PrintWriter output, TerminalStyle style,

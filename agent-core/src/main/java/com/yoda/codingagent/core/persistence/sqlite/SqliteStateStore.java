@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.yoda.codingagent.core.api.ErrorCode;
+import com.yoda.codingagent.core.api.CommandAccessMode;
 import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
@@ -470,9 +471,18 @@ public final class SqliteStateStore implements StateStore {
     @Override
     public void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt,
                           String userInput, boolean thinkingEnabled) {
+        beginTurn(turnId, sessionId, startedAt, userInput, thinkingEnabled,
+                CommandAccessMode.RESTRICTED);
+    }
+
+    @Override
+    public void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt,
+                          String userInput, boolean thinkingEnabled,
+                          CommandAccessMode commandAccessMode) {
         Objects.requireNonNull(turnId, "turnId");
         Objects.requireNonNull(sessionId, "sessionId");
         Objects.requireNonNull(startedAt, "startedAt");
+        Objects.requireNonNull(commandAccessMode, "commandAccessMode");
         String input = requireNonBlank(userInput, "userInput");
         withTransaction(connection -> {
             SessionStatus sessionStatus = findSessionStatus(connection, sessionId);
@@ -494,16 +504,17 @@ public final class SqliteStateStore implements StateStore {
             long now = startedAt.toEpochMilli();
             try (PreparedStatement statement = connection.prepareStatement("""
                     INSERT INTO turns
-                        (id, session_id, turn_no, thinking_enabled, status, termination_reason,
-                         created_at, updated_at, finished_at)
-                    VALUES (?, ?, ?, ?, 'RUNNING', NULL, ?, ?, NULL)
+                        (id, session_id, turn_no, thinking_enabled, command_access_mode,
+                         status, termination_reason, created_at, updated_at, finished_at)
+                    VALUES (?, ?, ?, ?, ?, 'RUNNING', NULL, ?, ?, NULL)
                     """)) {
                 statement.setString(1, turnId.value().toString());
                 statement.setString(2, sessionId.value().toString());
                 statement.setInt(3, turnNo);
                 statement.setInt(4, thinkingEnabled ? 1 : 0);
-                statement.setLong(5, now);
+                statement.setString(5, commandAccessMode.name());
                 statement.setLong(6, now);
+                statement.setLong(7, now);
                 requireOneRow(statement.executeUpdate(), "begin turn");
             }
             insertMessage(connection, sessionId, turnId, null, null,

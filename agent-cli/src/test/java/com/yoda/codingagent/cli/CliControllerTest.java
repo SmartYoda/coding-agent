@@ -10,6 +10,8 @@ import com.yoda.codingagent.core.api.AgentRequest;
 import com.yoda.codingagent.core.api.AgentResult;
 import com.yoda.codingagent.core.api.AgentService;
 import com.yoda.codingagent.core.api.CancellationToken;
+import com.yoda.codingagent.core.api.CommandAccessMode;
+import com.yoda.codingagent.core.api.CommandApprovalGateway;
 import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionConfig;
@@ -91,6 +93,24 @@ class CliControllerTest {
         assertEquals(ThinkingMode.DEFAULT,
                 fixture.service().requests.getFirst().thinkingMode());
         assertTrue(fixture.output().contains("A turn is active"));
+        assertTrue(fixture.output().contains("/approve, /deny, /cancel"));
+        fixture.controller().handle(new CliCommand.Exit());
+    }
+
+    @Test
+    void commandAccessIsCapturedForOneTurnThenResetsToRestricted() throws Exception {
+        Fixture fixture = fixture(false);
+
+        fixture.controller().handle(new CliCommand.AccessSet(CommandAccessMode.FULL_ACCESS));
+        fixture.controller().handle(new CliCommand.Prompt("full"));
+        awaitIdle(fixture.controller());
+        fixture.controller().handle(new CliCommand.Prompt("default"));
+        awaitIdle(fixture.controller());
+
+        assertEquals(List.of(CommandAccessMode.FULL_ACCESS, CommandAccessMode.RESTRICTED),
+                fixture.service().requests.stream()
+                        .map(AgentRequest::commandAccessMode).toList());
+        assertTrue(fixture.output().contains("FULL ACCESS selected for the next turn only"));
         fixture.controller().handle(new CliCommand.Exit());
     }
 
@@ -417,6 +437,14 @@ class CliControllerTest {
                     sessionId, turnId, 2, Instant.now()));
             return AgentResult.completed(workspace.workspaceId(), sessionId, turnId,
                     "done", 1, 0, Duration.ofMillis(1));
+        }
+
+        @Override
+        public AgentResult runTurn(SessionId sessionId, AgentRequest request,
+                                   AgentEventSink eventSink,
+                                   CancellationToken cancellationToken,
+                                   CommandApprovalGateway approvalGateway) {
+            return runTurn(sessionId, request, eventSink, cancellationToken);
         }
     }
 
