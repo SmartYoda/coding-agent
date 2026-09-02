@@ -22,12 +22,19 @@ class AgentApiContractTest {
     @Test
     void thinkingModeUsesDefaultUnlessExplicitlyOverridden() {
         assertEquals(ThinkingMode.DEFAULT, new AgentRequest("task").thinkingMode());
+        assertEquals(CommandAccessMode.RESTRICTED,
+                new AgentRequest("task").commandAccessMode());
+        assertEquals(CommandAccessMode.ASK,
+                new AgentRequest("task", ThinkingMode.DEFAULT,
+                        CommandAccessMode.ASK).commandAccessMode());
         assertEquals(true, ThinkingMode.DEFAULT.resolve(true));
         assertEquals(false, ThinkingMode.DEFAULT.resolve(false));
         assertEquals(true, ThinkingMode.ENABLED.resolve(false));
         assertEquals(false, ThinkingMode.DISABLED.resolve(true));
         assertThrows(NullPointerException.class,
                 () -> new AgentRequest("task", null));
+        assertThrows(NullPointerException.class,
+                () -> new AgentRequest("task", ThinkingMode.DEFAULT, null));
     }
 
     @Test
@@ -89,6 +96,9 @@ class AgentApiContractTest {
                 ErrorCode.INTERNAL_ERROR, "failed"));
         assertThrows(IllegalArgumentException.class, () -> new AgentEvent.ModelToolCallDelta(
                 workspaceId, sessionId, turnId, 1, now, 0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new AgentEvent.ToolStarted(
+                workspaceId, sessionId, turnId, 1, now, "call", "read_file",
+                "line one\nline two"));
 
         List<TurnId> tooMany = java.util.stream.IntStream.rangeClosed(
                         1, AgentEvent.MAX_REPORTED_COMPACTION_TURNS + 1)

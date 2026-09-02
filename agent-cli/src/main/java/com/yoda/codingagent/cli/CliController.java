@@ -3,6 +3,8 @@ package com.yoda.codingagent.cli;
 import com.yoda.codingagent.core.api.AgentRequest;
 import com.yoda.codingagent.core.api.AgentService;
 import com.yoda.codingagent.core.api.CancellationToken;
+import com.yoda.codingagent.core.api.CommandAccessMode;
+import com.yoda.codingagent.core.api.CommandApprovalDecision;
 import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
@@ -30,6 +32,7 @@ final class CliController {
     private final ConsoleRenderer renderer;
     private final ContextView contextView;
     private final ExecutorService executor;
+    private final CliApprovalCoordinator approvalCoordinator = new CliApprovalCoordinator();
 
     private State state = State.IDLE;
     private WorkspaceDescriptor workspace;
@@ -39,6 +42,7 @@ final class CliController {
     private long generation;
     private boolean exiting;
     private ThinkingMode thinkingMode = ThinkingMode.DEFAULT;
+    private CommandAccessMode nextAccessMode = CommandAccessMode.RESTRICTED;
 
     CliController(AgentService service, RunLimits defaultRunLimits,
                   boolean defaultThinkingEnabled,
@@ -72,12 +76,19 @@ final class CliController {
             renderer.line(helpText());
             return Outcome.continueWithPrompt();
         }
+        if (command instanceof CliCommand.Approve approve) {
+            return resolveApproval(approve.approvalId(), CommandApprovalDecision.APPROVED);
+        }
+        if (command instanceof CliCommand.Deny deny) {
+            return resolveApproval(deny.approvalId(), CommandApprovalDecision.DENIED);
+        }
         if (command instanceof CliCommand.Prompt prompt) {
             startTurn(prompt.text());
             return new Outcome(false, false, 0);
         }
         if (!idle()) {
-            renderer.error("A turn is active; use /cancel, /context, /help, or /exit.");
+            renderer.error("A turn is active; use /approve, /deny, /cancel, /context, "
+                    + "/help, or /exit.");
             return Outcome.continueWithPrompt();
         }
         if (command instanceof CliCommand.ThinkingShow) {
@@ -86,6 +97,14 @@ final class CliController {
         }
         if (command instanceof CliCommand.ThinkingSet thinking) {
             setThinking(thinking.mode());
+            return Outcome.continueWithPrompt();
+        }
+        if (command instanceof CliCommand.AccessShow) {
+            renderAccess();
+            return Outcome.continueWithPrompt();
+        }
+        if (command instanceof CliCommand.AccessSet access) {
+            setAccess(access.mode());
             return Outcome.continueWithPrompt();
         }
         handleManagement(command);
@@ -100,6 +119,7 @@ final class CliController {
         long taskGeneration;
         SessionId sessionId;
         ThinkingMode capturedThinkingMode;
+        CommandAccessMode capturedAccessMode;
         final CancellationSource source = new CancellationSource();
         FutureTask<Void> task;
         String rejection = null;
@@ -109,25 +129,30 @@ final class CliController {
                 taskGeneration = 0;
                 sessionId = null;
                 capturedThinkingMode = null;
+                capturedAccessMode = null;
                 task = null;
             } else if (session == null || session.status() != SessionStatus.OPEN) {
                 rejection = "No OPEN session is selected; use /session new or /session use.";
                 taskGeneration = 0;
                 sessionId = null;
                 capturedThinkingMode = null;
+                capturedAccessMode = null;
                 task = null;
             } else {
                 taskGeneration = ++generation;
                 sessionId = session.sessionId();
                 capturedThinkingMode = thinkingMode;
+                capturedAccessMode = nextAccessMode;
+                nextAccessMode = CommandAccessMode.RESTRICTED;
                 cancellationSource = source;
                 state = State.RUNNING;
                 long capturedGeneration = taskGeneration;
                 SessionId capturedSessionId = sessionId;
                 ThinkingMode turnThinkingMode = capturedThinkingMode;
+                CommandAccessMode turnAccessMode = capturedAccessMode;
                 task = new FutureTask<>(() -> {
                     runTurn(capturedGeneration, capturedSessionId, input,
-                            turnThinkingMode, source);
+                            turnThinkingMode, turnAccessMode, source);
                     return null;
                 });
                 activeTask = task;
@@ -146,6 +171,7 @@ final class CliController {
                     activeTask = null;
                     cancellationSource = null;
                     state = State.IDLE;
+                    nextAccessMode = capturedAccessMode;
                 }
             }
             String reason = exception instanceof RejectedExecutionException
@@ -156,31 +182,30 @@ final class CliController {
     }
 
     private void runTurn(long taskGeneration, SessionId sessionId, String input,
-                         ThinkingMode turnThinkingMode, CancellationSource source) {
+                         ThinkingMode turnThinkingMode, CommandAccessMode turnAccessMode,
+                         CancellationSource source) {
         try {
             var result = service.runTurn(sessionId,
-                    new AgentRequest(input, turnThinkingMode), event -> {
+                    new AgentRequest(input, turnThinkingMode, turnAccessMode), event -> {
                 contextView.accept(taskGeneration, event);
                 renderer.render(event);
-            }, source);
+            }, source, approvalCoordinator);
             renderer.renderResult(result);
         } catch (RuntimeException exception) {
             renderer.error(exception.getMessage() == null
                     ? "Turn failed unexpectedly." : exception.getMessage());
         } finally {
-            boolean restorePrompt = false;
             synchronized (this) {
                 if (generation == taskGeneration && cancellationSource == source) {
                     activeTask = null;
                     cancellationSource = null;
                     if (state != State.CLOSED) {
+                        if (!exiting) {
+                            renderer.prompt();
+                        }
                         state = State.IDLE;
                     }
-                    restorePrompt = !exiting;
                 }
-            }
-            if (restorePrompt) {
-                renderer.prompt();
             }
         }
     }
@@ -278,6 +303,38 @@ final class CliController {
         renderer.line(message);
     }
 
+    private void setAccess(CommandAccessMode requested) {
+        synchronized (this) {
+            nextAccessMode = Objects.requireNonNull(requested, "requested");
+        }
+        if (requested == CommandAccessMode.FULL_ACCESS) {
+            renderer.warning("FULL ACCESS selected for the next turn only. Commands may read or "
+                    + "modify paths outside the workspace without approval.");
+        } else {
+            renderAccess();
+        }
+    }
+
+    private void renderAccess() {
+        CommandAccessMode mode;
+        synchronized (this) {
+            mode = nextAccessMode;
+        }
+        renderer.line("Command access for next turn: " + mode
+                + " (resets to RESTRICTED when the turn starts).");
+    }
+
+    private Outcome resolveApproval(String approvalId, CommandApprovalDecision decision) {
+        boolean resolved = approvalCoordinator.resolve(approvalId, decision);
+        if (!resolved) {
+            String pending = approvalCoordinator.pendingApprovalId();
+            renderer.error(pending == null
+                    ? "No command approval is pending."
+                    : "Approval id does not match the pending request: " + pending);
+        }
+        return idle() ? Outcome.continueWithPrompt() : Outcome.continueWithoutPrompt();
+    }
+
     private void handleManagement(CliCommand command) {
         if (command instanceof CliCommand.WorkspaceList) {
             renderer.workspaces(service.listWorkspaces());
@@ -368,6 +425,9 @@ final class CliController {
                 /workspace list|add <name> <path>|use <id>|archive <id>
                 /session list|new|use <id>|close [id]
                 /thinking [on|off|default]  show or set thinking for future turns
+                /access [restricted|ask|full]  set command access for the next turn only
+                /approve <id>  approve the pending command in ASK mode
+                /deny <id>     deny the pending command in ASK mode
                 /context  show persisted summary and the latest in-process context budget
                 /cancel   request cancellation of the active turn
                 /help     show commands
@@ -377,6 +437,10 @@ final class CliController {
     record Outcome(boolean exit, boolean prompt, int exitCode) {
         static Outcome continueWithPrompt() {
             return new Outcome(false, true, 0);
+        }
+
+        static Outcome continueWithoutPrompt() {
+            return new Outcome(false, false, 0);
         }
     }
 

@@ -2,7 +2,8 @@ package com.yoda.codingagent.core.api;
 
 import java.util.Objects;
 
-public record AgentRequest(String input, ThinkingMode thinkingMode) {
+public record AgentRequest(String input, ThinkingMode thinkingMode,
+                           CommandAccessMode commandAccessMode) {
 
     public static final int MAX_INPUT_CHARACTERS = 100_000;
 
@@ -14,9 +15,14 @@ public record AgentRequest(String input, ThinkingMode thinkingMode) {
             throw new IllegalArgumentException("input exceeds the character limit");
         }
         Objects.requireNonNull(thinkingMode, "thinkingMode");
+        Objects.requireNonNull(commandAccessMode, "commandAccessMode");
     }
 
     public AgentRequest(String input) {
-        this(input, ThinkingMode.DEFAULT);
+        this(input, ThinkingMode.DEFAULT, CommandAccessMode.RESTRICTED);
+    }
+
+    public AgentRequest(String input, ThinkingMode thinkingMode) {
+        this(input, thinkingMode, CommandAccessMode.RESTRICTED);
     }
 }

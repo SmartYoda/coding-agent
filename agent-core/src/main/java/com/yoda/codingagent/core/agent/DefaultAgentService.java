@@ -5,6 +5,7 @@ import com.yoda.codingagent.core.api.AgentEventSink;
 import com.yoda.codingagent.core.api.AgentRequest;
 import com.yoda.codingagent.core.api.AgentResult;
 import com.yoda.codingagent.core.api.CancellationToken;
+import com.yoda.codingagent.core.api.CommandApprovalGateway;
 import com.yoda.codingagent.core.api.SessionConfig;
 import com.yoda.codingagent.core.api.SessionDescriptor;
 import com.yoda.codingagent.core.api.SessionContextSummary;
@@ -97,14 +98,25 @@ public final class DefaultAgentService implements AgentService {
     public AgentResult runTurn(SessionId sessionId, AgentRequest request,
                                AgentEventSink eventSink,
                                CancellationToken cancellationToken) {
+        return runTurn(sessionId, request, eventSink, cancellationToken,
+                CommandApprovalGateway.denyAll());
+    }
+
+    @Override
+    public AgentResult runTurn(SessionId sessionId, AgentRequest request,
+                               AgentEventSink eventSink,
+                               CancellationToken cancellationToken,
+                               CommandApprovalGateway approvalGateway) {
         try (SessionRegistry.Lease lease = sessionRegistry.acquire(sessionId)) {
             Objects.requireNonNull(request, "request");
             AgentRequest safeRequest = new AgentRequest(
-                    secretRedactor.redact(request.input()), request.thinkingMode());
+                    secretRedactor.redact(request.input()), request.thinkingMode(),
+                    request.commandAccessMode());
             boolean thinkingEnabled = safeRequest.thinkingMode()
                     .resolve(defaultThinkingEnabled);
             return agentRunner.run(lease.session(), safeRequest, thinkingEnabled,
-                    eventSink, cancellationToken);
+                    eventSink, cancellationToken,
+                    Objects.requireNonNull(approvalGateway, "approvalGateway"));
         }
     }
 }

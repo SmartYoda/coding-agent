@@ -7,6 +7,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yoda.codingagent.core.api.CancellationToken;
+import com.yoda.codingagent.core.api.CommandAccessMode;
+import com.yoda.codingagent.core.api.CommandApprovalDecision;
+import com.yoda.codingagent.core.api.CommandApprovalGateway;
 import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.RunLimits;
 import com.yoda.codingagent.core.api.TurnId;
@@ -185,7 +188,7 @@ class CommandExecutionTest {
         assertEquals(ToolStatus.DENIED, approvalRequired.status());
         assertEquals("REQUIRE_APPROVAL",
                 approvalRequired.metadata().get("policyDecision"));
-        assertTrue(approvalRequired.output().contains("current runtime"));
+        assertTrue(approvalRequired.output().contains("restricted access"));
         assertTrue(approvalRequired.output().contains("do not retry"));
 
         var cancelledArguments = mapper.createObjectNode();
@@ -194,6 +197,67 @@ class CommandExecutionTest {
                 cancelledArguments), context(workspace, "cancel", () -> true));
         assertEquals(ToolStatus.CANCELLED, cancelled.status());
         assertEquals("true", cancelled.metadata().get("cancelled"));
+    }
+
+    @Test
+    void askModeRequiresAUserDecisionAndFullAccessBypassesPolicy(@TempDir Path temp)
+            throws Exception {
+        Path workspace = Files.createDirectory(temp.resolve("workspace"));
+        Path state = Files.createDirectory(temp.resolve("state"));
+        AtomicInteger starts = new AtomicInteger();
+        AtomicReference<List<String>> executed = new AtomicReference<>();
+        var executor = (com.yoda.codingagent.core.tool.process.CommandExecutor)
+                (argv, cwd, timeout, maximumBytes, token) -> {
+                    starts.incrementAndGet();
+                    executed.set(argv);
+                    return new CommandResult(0, "ok", "", Duration.ofMillis(1),
+                            false, false, false, null);
+                };
+        ExecuteCommandTool tool = new ExecuteCommandTool(state, executor);
+        assertEquals("Run a structured command subject to the current turn's command access "
+                + "policy", tool.definition().description());
+        ToolDispatcher dispatcher = new ToolDispatcher(new ToolRegistry(List.of(tool)),
+                value -> value, new ToolOutputTruncator());
+        var curl = mapper.createObjectNode();
+        curl.putArray("argv").add("curl").add("https://example.com");
+
+        AtomicReference<String> requestedId = new AtomicReference<>();
+        CommandApprovalGateway approve = (request, token) -> {
+            requestedId.set(request.approvalId());
+            return CommandApprovalDecision.APPROVED;
+        };
+        ToolResult approved = dispatcher.dispatch(
+                new ToolCall("approval-1", "execute_command", curl),
+                context(workspace, "approval-1", CommandAccessMode.ASK, approve));
+        assertEquals(ToolStatus.SUCCESS, approved.status());
+        assertTrue(requestedId.get() != null && !requestedId.get().isBlank());
+        assertEquals("USER_APPROVED", approved.metadata().get("policyDecision"));
+        assertEquals(1, starts.get());
+
+        ToolResult userDenied = dispatcher.dispatch(
+                new ToolCall("approval-2", "execute_command", curl),
+                context(workspace, "approval-2", CommandAccessMode.ASK,
+                        (request, token) -> CommandApprovalDecision.DENIED));
+        assertEquals(ToolStatus.DENIED, userDenied.status());
+        assertEquals("USER_DENIED", userDenied.metadata().get("policyDecision"));
+        assertEquals(1, starts.get());
+
+        var prohibited = mapper.createObjectNode();
+        prohibited.putArray("argv").add("rm").add("-rf").add(".");
+        ToolResult askHardDenied = dispatcher.dispatch(
+                new ToolCall("approval-3", "execute_command", prohibited),
+                context(workspace, "approval-3", CommandAccessMode.ASK, approve));
+        assertEquals(ToolStatus.DENIED, askHardDenied.status());
+        assertEquals(1, starts.get());
+
+        ToolResult full = dispatcher.dispatch(
+                new ToolCall("full", "execute_command", prohibited),
+                context(workspace, "full", CommandAccessMode.FULL_ACCESS,
+                        CommandApprovalGateway.denyAll()));
+        assertEquals(ToolStatus.SUCCESS, full.status());
+        assertEquals("FULL_ACCESS", full.metadata().get("policyDecision"));
+        assertEquals(List.of("rm", "-rf", "."), executed.get());
+        assertEquals(2, starts.get());
     }
 
     @Test
@@ -283,6 +347,14 @@ class CommandExecutionTest {
                                        CancellationToken cancellationToken) throws Exception {
         return new ToolContext(WorkspaceId.random(), workspace.toRealPath(), TurnId.random(),
                 callId, Instant.now().plusSeconds(30), RunLimits.DEFAULTS, cancellationToken);
+    }
+
+    private static ToolContext context(Path workspace, String callId,
+                                       CommandAccessMode accessMode,
+                                       CommandApprovalGateway approvalGateway) throws Exception {
+        return new ToolContext(WorkspaceId.random(), workspace.toRealPath(), TurnId.random(),
+                callId, Instant.now().plusSeconds(30), RunLimits.DEFAULTS,
+                CancellationToken.NONE, accessMode, approvalGateway);
     }
 
     private record PolicyCase(List<String> argv, CommandDecision expected) { }

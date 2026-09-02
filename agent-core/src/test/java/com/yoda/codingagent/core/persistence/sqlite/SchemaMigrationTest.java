@@ -50,6 +50,33 @@ class SchemaMigrationTest {
                     SELECT COUNT(*) FROM flyway_schema_history
                     WHERE version = '1' AND success = 1
                     """));
+            assertEquals(1, queryInt(connection, """
+                    SELECT COUNT(*) FROM flyway_schema_history
+                    WHERE version = '2' AND success = 1
+                    """));
+        }
+    }
+
+    @Test
+    void upgradesVersionOneTurnsWithRestrictedAccessDefault(@TempDir Path tempDirectory)
+            throws Exception {
+        SQLiteDataSource dataSource = dataSource(tempDirectory.resolve("upgrade-v1.db"));
+        Flyway.configure().dataSource(dataSource).locations("classpath:db/migration")
+                .target("1").load().migrate();
+        try (Connection connection = openConnection(dataSource)) {
+            insertWorkspace(connection, "workspace-v1", "/tmp/workspace-v1");
+            insertSession(connection, "session-v1", "workspace-v1");
+            insertTurn(connection, "turn-v1", "session-v1", 1);
+        }
+
+        migrate(dataSource);
+
+        try (Connection connection = openConnection(dataSource);
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT command_access_mode FROM turns WHERE id = 'turn-v1'");
+             ResultSet resultSet = statement.executeQuery()) {
+            assertEquals(true, resultSet.next());
+            assertEquals("RESTRICTED", resultSet.getString(1));
         }
     }
 
@@ -89,6 +116,12 @@ class SchemaMigrationTest {
                          created_at, updated_at, finished_at)
                     VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)
                     """, "bad-turn", "session-1", 1, "STOPPED", null, NOW, NOW, null);
+            assertRejected(connection, """
+                    INSERT INTO turns
+                        (id, session_id, turn_no, thinking_enabled, command_access_mode,
+                         status, created_at, updated_at)
+                    VALUES (?, ?, ?, 0, ?, 'RUNNING', ?, ?)
+                    """, "bad-access", "session-1", 1, "UNSAFE", NOW, NOW);
 
             insertTurn(connection, "turn-1", "session-1", 1);
             assertRejected(connection, """

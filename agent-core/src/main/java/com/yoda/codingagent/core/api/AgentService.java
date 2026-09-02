@@ -21,6 +21,14 @@ public interface AgentService {
 
     void closeSession(SessionId sessionId);
 
+    default AgentResult runTurn(SessionId sessionId, AgentRequest request,
+                                AgentEventSink eventSink,
+                                CancellationToken cancellationToken) {
+        return runTurn(sessionId, request, eventSink, cancellationToken,
+                CommandApprovalGateway.denyAll());
+    }
+
     AgentResult runTurn(SessionId sessionId, AgentRequest request,
-                        AgentEventSink eventSink, CancellationToken cancellationToken);
+                        AgentEventSink eventSink, CancellationToken cancellationToken,
+                        CommandApprovalGateway approvalGateway);
 }

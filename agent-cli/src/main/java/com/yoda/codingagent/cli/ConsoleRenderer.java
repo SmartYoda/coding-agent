@@ -1,5 +1,7 @@
 package com.yoda.codingagent.cli;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yoda.codingagent.core.api.AgentEvent;
 import com.yoda.codingagent.core.api.AgentResult;
 import com.yoda.codingagent.core.api.SessionContextSummary;
@@ -12,6 +14,8 @@ import java.util.Objects;
 import java.util.function.UnaryOperator;
 
 public final class ConsoleRenderer {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final PrintWriter output;
     private final UnaryOperator<String> redactor;
@@ -39,14 +43,31 @@ public final class ConsoleRenderer {
         } else if (event instanceof AgentEvent.ToolStarted started) {
             separateLine();
             output.println(style.tool("[tool]") + " " + style.safe(started.toolName())
-                    + " " + style.warning("started"));
+                    + " " + style.warning("started") + detail(started.detail()));
             output.flush();
         } else if (event instanceof AgentEvent.ToolCompleted completed) {
             separateLine();
             String status = completed.success()
                     ? style.success("completed") : style.error("failed");
             output.println(style.tool("[tool]") + " " + style.safe(completed.toolName())
-                    + " " + status);
+                    + " " + status + detail(completed.detail()));
+            output.flush();
+        } else if (event instanceof AgentEvent.CommandApprovalRequested requested) {
+            separateLine();
+            output.println(style.strongWarning("[approval required]") + " id="
+                    + style.identifier(requested.approvalId()));
+            output.println(style.label("command:") + " "
+                    + safeArguments(requested.argv()));
+            output.println(style.label("cwd:") + " " + safe(requested.cwd()));
+            output.println("Use " + style.safe("/approve " + requested.approvalId())
+                    + " or " + style.safe("/deny " + requested.approvalId()) + ".");
+            output.flush();
+        } else if (event instanceof AgentEvent.CommandApprovalResolved resolved) {
+            separateLine();
+            output.println(style.warning("[approval]") + " "
+                    + style.identifier(resolved.approvalId()) + " "
+                    + safe(resolved.decision().name().toLowerCase(
+                            java.util.Locale.ROOT)));
             output.flush();
         } else if (event instanceof AgentEvent.TurnFailed failed) {
             separateLine();
@@ -98,6 +119,13 @@ public final class ConsoleRenderer {
         separateLine();
         promptVisible = false;
         output.println(style.error("[error]") + " " + safe(message));
+        output.flush();
+    }
+
+    public synchronized void warning(String message) {
+        separateLine();
+        promptVisible = false;
+        output.println(style.strongWarning("[warning]") + " " + safe(message));
         output.flush();
     }
 
@@ -185,6 +213,22 @@ public final class ConsoleRenderer {
 
     private String safe(String message) {
         return style.safe(redactor.apply(message));
+    }
+
+    private String safeArguments(List<String> arguments) {
+        List<String> redacted = arguments.stream().map(redactor).toList();
+        try {
+            return style.safe(JSON.writeValueAsString(redacted));
+        } catch (JsonProcessingException exception) {
+            return "[\"<unavailable>\"]";
+        }
+    }
+
+    private String detail(String value) {
+        if (value.isEmpty()) {
+            return "";
+        }
+        return " " + style.muted("— " + redactor.apply(value));
     }
 
     private void separateLine() {

@@ -2,6 +2,9 @@ package com.yoda.codingagent.core.tool.builtin;
 
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.yoda.codingagent.core.api.ErrorCode;
+import com.yoda.codingagent.core.api.CommandAccessMode;
+import com.yoda.codingagent.core.api.CommandApprovalDecision;
+import com.yoda.codingagent.core.api.CommandApprovalRequest;
 import com.yoda.codingagent.core.safety.CommandDecision;
 import com.yoda.codingagent.core.safety.CommandPolicy;
 import com.yoda.codingagent.core.safety.WorkspaceGuard;
@@ -46,17 +49,32 @@ public final class ExecuteCommandTool implements Tool {
                 Math.toIntExact(context.runLimits().commandTimeout().toSeconds()), 1, 900);
         WorkspaceGuard guard = FileToolSupport.guard(context, protectedDataDirectory);
         Path cwd = guard.resolveCommandDirectory(requestedCwd);
-        CommandDecision decision = new CommandPolicy(
-                context.workspaceRoot(), protectedDataDirectory).evaluate(argv, cwd);
-        if (decision != CommandDecision.ALLOW) {
-            String output = decision == CommandDecision.REQUIRE_APPROVAL
-                    ? "Command requires approval, but the current runtime has no approval channel; "
-                    + "do not retry the same or an equivalent command."
-                    : "Command is prohibited by policy; do not retry the same or an "
-                    + "equivalent command.";
-            return new ToolResult(ToolStatus.DENIED, output,
-                    ErrorCode.COMMAND_DENIED, false, Duration.ZERO,
-                    Map.of("policyDecision", decision.name()));
+        CommandDecision policyDecision = context.commandAccessMode() == CommandAccessMode.FULL_ACCESS
+                ? CommandDecision.ALLOW
+                : new CommandPolicy(context.workspaceRoot(), protectedDataDirectory)
+                        .evaluate(argv, cwd);
+        String executionDecision = null;
+        if (policyDecision == CommandDecision.DENY) {
+            return denied("Command is prohibited by policy; do not retry the same or an "
+                    + "equivalent command.", policyDecision.name());
+        }
+        if (policyDecision == CommandDecision.REQUIRE_APPROVAL) {
+            if (context.commandAccessMode() == CommandAccessMode.RESTRICTED) {
+                return denied("Command requires approval, but this turn uses restricted access; "
+                        + "do not retry the same or an equivalent command.",
+                        policyDecision.name());
+            }
+            CommandApprovalDecision approval = context.commandApprovalGateway().requestApproval(
+                    new CommandApprovalRequest(java.util.UUID.randomUUID().toString(),
+                            context.workspaceId(),
+                            context.turnId(), context.callId(), argv, cwd,
+                            context.turnDeadline()), context.cancellationToken());
+            if (approval != CommandApprovalDecision.APPROVED) {
+                return approvalResult(approval);
+            }
+            executionDecision = "USER_APPROVED";
+        } else if (context.commandAccessMode() == CommandAccessMode.FULL_ACCESS) {
+            executionDecision = "FULL_ACCESS";
         }
         if (context.cancellationToken().isCancelled()) {
             return new ToolResult(ToolStatus.CANCELLED, fixedOutput("", ""),
@@ -75,7 +93,41 @@ public final class ExecuteCommandTool implements Tool {
         }
         CommandResult command = runner.run(argv, cwd, effective,
                 context.runLimits().maxToolOutputChars(), context.cancellationToken());
-        return convert(command);
+        return withDecision(convert(command), executionDecision);
+    }
+
+    private static ToolResult denied(String output, String policyDecision) {
+        return new ToolResult(ToolStatus.DENIED, output, ErrorCode.COMMAND_DENIED,
+                false, Duration.ZERO, Map.of("policyDecision", policyDecision));
+    }
+
+    private static ToolResult approvalResult(CommandApprovalDecision decision) {
+        return switch (decision) {
+            case DENIED -> denied("Command was denied by the user; do not retry the same or an "
+                    + "equivalent command.", "USER_DENIED");
+            case CANCELLED -> new ToolResult(ToolStatus.CANCELLED, fixedOutput("", ""),
+                    ErrorCode.CANCELLED, false, Duration.ZERO,
+                    Map.of("timedOut", "false", "cancelled", "true",
+                            "outputBytesTruncated", "false",
+                            "policyDecision", "APPROVAL_CANCELLED"));
+            case TIMED_OUT -> new ToolResult(ToolStatus.TIMED_OUT, fixedOutput("", ""),
+                    ErrorCode.COMMAND_TIMEOUT, false, Duration.ZERO,
+                    Map.of("timedOut", "true", "cancelled", "false",
+                            "outputBytesTruncated", "false",
+                            "policyDecision", "APPROVAL_TIMED_OUT"));
+            case APPROVED -> throw new IllegalArgumentException(
+                    "approved decisions must continue to command execution");
+        };
+    }
+
+    private static ToolResult withDecision(ToolResult result, String decision) {
+        if (decision == null) {
+            return result;
+        }
+        Map<String, String> metadata = new LinkedHashMap<>(result.metadata());
+        metadata.put("policyDecision", decision);
+        return new ToolResult(result.status(), result.output(), result.errorCode(),
+                result.truncated(), result.duration(), metadata);
     }
 
     private static ToolResult convert(CommandResult command) {
@@ -132,6 +184,7 @@ public final class ExecuteCommandTool implements Tool {
         timeout.put("description", "Optional timeout; defaults to the session command limit");
         FileToolSupport.require(schema, "argv");
         return new ToolDefinition("execute_command",
-                "Run an approved build, test, or read-only Git command", schema);
+                "Run a structured command subject to the current turn's command access policy",
+                schema);
     }
 }

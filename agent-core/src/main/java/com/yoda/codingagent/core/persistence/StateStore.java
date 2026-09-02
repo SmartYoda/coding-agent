@@ -1,6 +1,7 @@
 package com.yoda.codingagent.core.persistence;
 
 import com.yoda.codingagent.core.api.WorkspaceDescriptor;
+import com.yoda.codingagent.core.api.CommandAccessMode;
 import com.yoda.codingagent.core.api.WorkspaceId;
 import com.yoda.codingagent.core.api.ErrorCode;
 import com.yoda.codingagent.core.api.TurnStatus;
@@ -44,6 +45,13 @@ public interface StateStore {
 
     void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt, String userInput,
                    boolean thinkingEnabled);
+
+    default void beginTurn(TurnId turnId, SessionId sessionId, Instant startedAt,
+                           String userInput, boolean thinkingEnabled,
+                           CommandAccessMode commandAccessMode) {
+        java.util.Objects.requireNonNull(commandAccessMode, "commandAccessMode");
+        beginTurn(turnId, sessionId, startedAt, userInput, thinkingEnabled);
+    }
 
     void markTurnStreaming(TurnId turnId, int stepNo);
 
